@@ -1,0 +1,18 @@
+# Python 虚拟环境：对方用 requirements.txt 自己装，不该进仓库（285 MB）
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# 游戏安装包与解包数据（135 MB，超过 GitHub 100 MB 上限）
+apk/
+
+# 运行期数据：账号存档（含玩家名/主城坐标）、地图缓存、队列、日志
+data/
+logs/
+
+# 本机临时
+_tmp/
+*.tmp
+*.bak
+config.yaml.bak

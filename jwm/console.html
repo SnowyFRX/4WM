@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>九万亩 · 控制台</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg:#0E1015; --surface:#161A22; --surface-2:#1B2029; --surface-3:#222834;
+    --stroke:#242A36; --stroke-hi:#303849;
+    --ink:#E9EDF5; --ink-2:#98A2B3; --ink-3:#5C6675;
+    --primary:#4C8DFF; --green:#3DDC97; --amber:#F2B45A; --red:#F16A76;
+    --purple:#A78BFA; --cyan:#57D3E8;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+    font:14px/1.55 "Microsoft YaHei UI","Microsoft YaHei","PingFang SC",sans-serif; }
+  main { max-width:min(96vw,1180px); margin:auto; padding:26px 24px 44px; }
+  header { display:flex; justify-content:space-between; align-items:baseline; gap:14px;
+    padding-bottom:16px; margin-bottom:18px; border-bottom:1px solid var(--stroke); }
+  h1 { margin:0; font-size:24px; font-weight:600; }
+  h2 { margin:0 0 10px; font-size:14px; font-weight:600; }
+  p { margin:0; }
+  .muted { color:var(--ink-2); font-size:12.5px; }
+  .panel { background:var(--surface); border:1px solid var(--stroke); border-radius:14px; padding:16px; }
+  .grid { display:grid; gap:16px; }
+  .row { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+  .dot { width:10px; height:10px; border-radius:50%; background:var(--ink-3); }
+  .dot.on { background:var(--green); box-shadow:0 0 10px var(--green); }
+  .dot.off { background:var(--ink-3); }
+  .status { font-size:15px; font-weight:600; }
+  .status.on { color:var(--green); }
+  .status.off { color:var(--ink-3); }
+  button { background:var(--surface-3); color:var(--ink); border:1px solid var(--stroke);
+    border-radius:9px; padding:9px 18px; font:inherit; font-size:13.5px; cursor:pointer;
+    transition:background .15s,border-color .15s; }
+  button:hover:not(:disabled) { background:#2A3242; border-color:var(--stroke-hi); }
+  button:disabled { color:var(--ink-3); background:var(--surface-2); cursor:default; }
+  button.primary { background:var(--green); border-color:transparent; color:#07130D; font-weight:600; }
+  button.primary:hover:not(:disabled) { background:#4FE7A6; }
+  button.primary:disabled { background:#1D2A25; color:#456053; }
+  button.danger { background:transparent; color:var(--red); border-color:#4A2A30; }
+  button.danger:hover:not(:disabled) { background:#2A1A1E; border-color:#6B3A42; }
+  button.danger:disabled { color:var(--ink-3); border-color:var(--stroke); background:transparent; }
+  pre { margin:0; padding:12px 14px; background:var(--surface-2); border-radius:10px;
+    font:12px/1.6 "Cascadia Mono",Consolas,monospace; color:var(--ink-2);
+    max-height:420px; overflow:auto; white-space:pre-wrap; word-break:break-all; }
+  .kv { display:flex; gap:18px; flex-wrap:wrap; color:var(--ink-2); font-size:12.5px; }
+  a.link { color:var(--primary); text-decoration:none; }
+  a.link:hover { text-decoration:underline; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>九万亩 · 控制台</h1>
+    <p class="muted" id="url"></p>
+  </header>
+
+  <div class="grid">
+    <section class="panel">
+      <div class="row" style="margin-bottom:14px">
+        <span class="dot off" id="dot"></span>
+        <span class="status off" id="statusText">未运行</span>
+        <span class="kv" id="meta"></span>
+      </div>
+      <div class="row">
+        <button class="primary" id="startBtn">启动脚本</button>
+        <button class="danger" id="stopBtn" disabled>停止脚本</button>
+        <a class="link" id="openApp" href="#" target="_blank" style="margin-left:auto">打开开荒地图 →</a>
+      </div>
+      <p class="muted" style="margin-top:12px">
+        启动后脚本会接管模拟器。不玩的时候点「停止脚本」，后台就只剩这个控制台，不占 CPU、不截图。
+      </p>
+    </section>
+
+    <section class="panel">
+      <h2>运行日志</h2>
+      <pre id="log">等待启动…</pre>
+    </section>
+  </div>
+</main>
+<script>
+  const $ = id => document.getElementById(id);
+  let busy = false;
+  const fmt = s => {
+    if (!s) return "";
+    const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), sec = s % 60;
+    return (h ? h + " 小时 " : "") + (h || m ? m + " 分 " : "") + sec + " 秒";
+  };
+  function render(s) {
+    const on = s.running;
+    $("dot").className = "dot " + (on ? "on" : "off");
+    $("statusText").className = "status " + (on ? "on" : "off");
+    $("statusText").textContent = on ? "正在运行" : "未运行";
+    $("meta").textContent = on
+      ? "PID " + s.pid + " · 已运行 " + fmt(s.uptime)
+      : "脚本已停止，后台只有控制台";
+    $("startBtn").disabled = busy || on;
+    $("stopBtn").disabled = busy || !on;
+    // 脚本在跑时，开荒地图是脚本自己起的服务
+    const app = on ? "http://127.0.0.1:8766/jwm/" : "";
+    $("openApp").style.display = on ? "" : "none";
+    if (on) $("openApp").href = app;
+    if (s.log && s.log.length) $("log").textContent = s.log.join("\n");
+  }
+  async function post(path) {
+    if (busy) return;
+    busy = true;
+    try {
+      const r = await fetch(path, { method: "POST" });
+      const data = await r.json();
+      render(data);
+      if (data.message) $("statusText").textContent = data.message;
+    } catch (e) {
+      $("statusText").textContent = "操作失败：" + e.message;
+    } finally {
+      busy = false;
+    }
+  }
+  $("startBtn").onclick = () => post("start");
+  $("stopBtn").onclick = () => {
+    if (confirm("停止脚本？停止后模拟器不会被操作，后台只留控制台。")) post("stop");
+  };
+  async function poll() {
+    try {
+      const r = await fetch("state", { cache: "no-store" });
+      render(await r.json());
+    } catch (e) { /* 控制台还在，失败就下轮再试 */ }
+  }
+  $("url").textContent = location.origin + location.pathname;
+  poll();
+  setInterval(poll, 2000);
+</script>
+</body>
+</html>
