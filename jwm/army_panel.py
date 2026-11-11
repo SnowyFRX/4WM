@@ -44,35 +44,34 @@ def avatar_at(img, i, ny):
 
 
 def unit_strip(img, ny):
-    """把这张卡片的整块士兵区域直接裁下来（不逐格拼），供网页显示。
+    """把这张卡片「名字下方那一整条士兵区」截下来，供网页显示。
 
-    为什么整块截：逐格按坐标裁要精确对齐每个头像，稍有偏差就错位；
-    整块裁只需要知道这一行的上下边界，玩家的眼睛本来就能看出有几个兵、什么兵种。
+    固定截满 9 个兵位的宽度，不按实际兵数动态裁：
+    这样每张编队卡片图一样宽、行与行能对齐，一眼就能横向比较各队人数和兵种；
+    按实际兵数裁的话，3 个兵的图很短、9 个兵的很长，看起来七零八落。
 
-    实测：名字锚点 ny 时，士兵行在 ny+25 ~ ny+95。翻页后卡片位置会变，
-    所以裁完还要自检：这一行必须有“周期性头像结构”，否则返回 None（宁可不显示，也不放错图）。
+    实测：士兵区 y = ny+25 ~ ny+95（高 70）。左边这条要按像素砍干净：
+      x=0~19   卡片自己的深色/彩色描边
+      x=20~41  卡片左侧那道更白的米黄高光（比兵位底色白一档，留着很脏）
+      x=42 起  正常的兵位底色
+    所以从 42 起裁，图直接从兵位底色开始，左边不留白条。9 个兵位到 x≈648。
+    网页里统一按高度缩放，各队图一样宽、大小一致。
     """
     y1, y2 = ny + 25, ny + 95
     h, w = img.shape[:2]
-    # 屏幕底部有一条「招募3个远程士兵…」的横幅，压在卡片上。
-    # 卡片名字在 y>1000、或士兵行挨到 y>1080 时，截出来的图会被横幅污染（兵力也会数错），
-    # 这时不截 —— 等它滚到屏幕中间那一屏再截。
+    # 屏幕底部有「招募…」横幅压在卡片上，那时截出来是错的：不截，等它滚到中间
     if y1 < 0 or y2 > 1080 or ny > 1000:
         return None
-    y1, y2 = max(0, y1), min(h, y2)
     if y2 - y1 < 20:
         return None
-    x1, x2 = 40, min(w, 690)
+    x1, x2 = 42, min(w, 648)
     block = img[y1:y2, x1:x2]
     if block.size == 0:
         return None
+    # 自检：这一条里应有“等间距头像块”，没有就说明截错区域
     hsv = cv2.cvtColor(block, cv2.COLOR_BGR2HSV)
     fg = (hsv[:, :, 1] >= 60) | (hsv[:, :, 2] <= 100)
     col = fg.mean(axis=0)
-    cols = np.nonzero(col > 0.15)[0]
-    if len(cols) < 20:
-        return None
-    # 自检：士兵头像块等间距排列，横向投影应有 ≥2 个“凸起”。没有就说明截错区域了。
     on = (col > 0.25).astype(int)
     runs, prev = 0, 0
     for v in on:
@@ -81,8 +80,7 @@ def unit_strip(img, ny):
         prev = v
     if runs < 2:
         return None
-    right = min(block.shape[1], int(cols.max()) + 8)
-    return block[:, :max(60, right)]
+    return block
 
 
 def unit_mix(img, ny):
@@ -217,16 +215,21 @@ def parse_armies(sc):
         anchors.append((ny, name, pos))
 
     # 第二遍：改过名的编队（如「挨揍」）名字不是「编队N」，直接按“左半边的卡片名字行”识别。
-    # 名字行的特征：x < 250、y > 300、2~6 个汉字、不是状态词、不是位置、不是顶部按钮文字。
+    # 名字行的特征：x < 200、y > 300、2~6 个汉字、不是状态词、不是位置、不是顶部按钮文字。
+    # 真机的名字都贴在卡片最左边（x≈60~130），位置文字则靠右且通常带「地(坐标)」，
+    # 所以这里必须收紧：旧条件 x<250 把「木头地」「主城」这类位置/地名也当成了编队名，
+    # 日志里出现「6 支（拥有 5）」就是这么来的。
     used = [a[0] for a in anchors]
     for b in boxes:
         t = b.text.strip()
-        if b.center[0] >= 250 or b.center[1] < 300:
+        if b.center[0] >= 200 or b.center[1] < 300:
             continue
         if not (1 <= len(t) <= 6) or not re.fullmatch(r"[\u4e00-\u9fa5]+", t):
             continue
         if re.search(STATE_WORDS, t) or re.search(r"拥有军队|招募|选择|建筑|所有军队|领土|战报|图鉴", t):
             continue
+        if re.search(r"地$|城$|营$|场$|矿$|林$|山$|湖$|河$|海$|田$", t):
+            continue   # 地图格名/建筑名，不是编队名
         ny = b.center[1]
         if any(abs(ny - y) < 80 for y in used):
             continue

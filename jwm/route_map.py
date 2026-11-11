@@ -5,7 +5,7 @@ import secrets
 import threading
 import time
 import webbrowser
-from collections import Counter
+from collections import Counter, deque
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -13,6 +13,7 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 PAGE = Path(__file__).with_name("route_map.html")
 CACHE = Path(__file__).resolve().parent.parent / "data" / "map_cache.json"
+ROUTE_FILE = Path(__file__).resolve().parent.parent / "data" / "route.json"
 CACHE_MAX_AGE = 7 * 24 * 3600  # 缓存最长留一周（领地会变，太旧就没意义）
 MAX_FRAMES = 28
 SCAN_RADIUS = 48
@@ -32,6 +33,7 @@ class RouteMap:
         self.lock = threading.Lock()
         self.wake = threading.Event()
         self.scan = ("home", None)
+        self.pending_scans = deque()   # 框选刷新时排队的多个中心
         self.scanning = False
         self.warming = False
         self.retry_scan_at = 0
@@ -44,15 +46,93 @@ class RouteMap:
         self.frame = 0
         self.known = {}
         self.res_map = {}
-        self.path = ()
-        self.active = False
-        self.index = 0
+        # 多条路线：每条 {key, path, index, active}。self.current 指向正在编辑/刚提交的那条。
+        # 脚本按顺序轮转执行，遇到「当前格还在行军/等资源」的路线就跳去下一条，
+        # 避免一条路线等行军时整台机器空转。
+        self.routes = []
+        self.current = ""
+        self._step_key = ""
         self.revision = 0
         self.status = "请在地图上按顺序选格，然后开始开荒。"
         self.suggested = None
+        self.pending_cache = False   # ask 模式下：有缓存可供用户选择沿用
+        self.skips = []              # 最近被跳过的格子及原因（网页上如实展示）
+        self.route_mode = "strict"   # strict=严格听用户的 / flexible=允许自动绕行
+        self.route_key = ""          # 这条路线自己的身份（小队按它绑定，可同时存在多条路线）
+        self.region = None           # 用户框选的待刷新区域 (x1,y1,x2,y2)
         self.runtime = dict(task="game", detail="等待连接游戏", mode="waiting", since=time.time())
         self.recent_event = None
         self.operations = operations
+
+    # ---------- 路线存取（多条路线，但对老代码保持「当前那条」的读写语义） ----------
+    def _route_of(self, key=None):
+        key = self.current if key is None else key
+        for r in self.routes:
+            if r["key"] == key:
+                return r
+        return None
+
+    def _ensure_route(self):
+        """拿到「当前路线」；还没有就建一条占位的（key 在提交时再定）。"""
+        r = self._route_of()
+        if r is None:
+            r = {"key": self.current or "", "path": (), "index": 0, "active": False}
+            self.routes.append(r)
+            self.current = r["key"]
+        return r
+
+    @property
+    def path(self):
+        r = self._route_of()
+        return tuple(r["path"]) if r else ()
+
+    @path.setter
+    def path(self, value):
+        self._ensure_route()["path"] = tuple(tuple(p) for p in value)
+
+    @property
+    def index(self):
+        r = self._route_of()
+        return int(r["index"]) if r else 0
+
+    @index.setter
+    def index(self, value):
+        self._ensure_route()["index"] = int(value)
+
+    @property
+    def active(self):
+        r = self._route_of()
+        return bool(r["active"]) if r else False
+
+    @active.setter
+    def active(self, value):
+        self._ensure_route()["active"] = bool(value)
+
+    @property
+    def route_key(self):
+        return self.current
+
+    @route_key.setter
+    def route_key(self, value):
+        r = self._ensure_route()
+        old = r["key"]
+        r["key"] = str(value or "")
+        self.current = r["key"]
+        if old != r["key"]:
+            for other in self.routes:
+                if other is not r and other["key"] == r["key"]:
+                    other["key"] = old or other["key"] + "'"   # 极少见的撞车，避免出现两条同名
+
+    def route_summary(self):
+        """给网页的路线列表（不含具体格子，省流量）。"""
+        with self.lock:
+            out = []
+            for r in self.routes:
+                path = r["path"]
+                out.append(dict(key=r["key"], count=len(path), index=int(r["index"]),
+                                active=bool(r["active"]), current=(r["key"] == self.current),
+                                head=list(path[r["index"]]) if int(r["index"]) < len(path) else None))
+            return out
 
     def phase(self, detail, task=None, mode="running"):
         with self.lock:
@@ -71,6 +151,13 @@ class RouteMap:
                         path=self.path, home=self.home, active=self.active,
                         index=self.index, revision=self.revision, status=self.status,
                         runtime=self.runtime, recentEvent=self.recent_event, suggestedPath=self.suggested,
+                        pendingCache=self.pending_cache, skips=[dict(s) for s in self.skips],
+                        routeMode=self.route_mode, routeKey=self.route_key,
+                        routes=[dict(key=r["key"], count=len(r["path"]), index=int(r["index"]),
+                                     active=bool(r["active"]), current=(r["key"] == self.current),
+                                     head=(list(r["path"][r["index"]]) if int(r["index"]) < len(r["path"]) else None))
+                                for r in self.routes],
+                        region=list(self.region) if self.region else None,
                         scanning=bool(self.scan or self.scanning), warming=self.warming, mapError=self.map_error)
 
     def command(self, data):
@@ -92,30 +179,134 @@ class RouteMap:
                 else:
                     raise ValueError("该位置超出主城周边的可读取范围。")
                 self.map_error = ""
+            elif action == "scan_region":
+                # 用户在地图上框一块区域 → 只把这几个视野重扫一遍（别的格子不动）
+                self.scan_region(data.get("region"))
+                self.map_error = ""
+            elif action == "use_cache":
+                # 用户选择沿用上次缓存
+                n = self._cache_load(self.home) if self.home else 0
+                self.pending_cache = False
+                self.status = ("已沿用上次地图（%d 格）。" % n) if n else "没有可用缓存。"
+            elif action == "fresh_scan":
+                # 用户选择重新读取：清掉内存里的地图，让脚本重扫
+                self.known.clear()
+                self.res_map.clear()
+                self.frames.clear()
+                self.view = None
+                self.pending_cache = False
+                self.scan = ("home", None)
+                self.status = "正在重新读取地图…"
+            elif action == "route_mode":
+                # 网页上切换「严格听你的 / 允许自动绕行」
+                mode = str(data.get("mode") or "").lower()
+                if mode not in ("strict", "flexible"):
+                    raise ValueError("模式只能是 strict 或 flexible。")
+                self.route_mode = mode
+                # expand.cfg 就是 bot.cfg["expand"] 的引用，改这里立刻生效
+                try:
+                    exp = getattr(self, "expand", None)
+                    target = getattr(exp, "cfg", None) if exp is not None else None
+                    if isinstance(target, dict):
+                        target["route_mode"] = mode
+                except Exception:
+                    log.debug("同步 route_mode 失败", exc_info=True)
+                self.status = ("已切换为严格模式：脚本不会改动你的路线。"
+                               if mode == "strict" else
+                               "已切换为绕行模式：打不动的地会自动跳开并告诉你。")
             elif action == "autoplan":
-                # 只生成建议路线（前端填进草稿，用户检查后再提交），不碰当前 path/active/revision
+                # 只生成建议路线，绝不自动生效：前端把它填进草稿，用户确认后才提交
                 self.suggested = [list(p) for p in self._auto_plan(data.get("count", 30))]
-                self.status = "已生成 %d 格建议路线，检查后点「开始开荒」。" % len(self.suggested)
-            elif action in ("start", "pause", "resume"):
+                self.status = ("已生成 %d 格建议（仅建议，不会自己生效）。"
+                               "点「用这条建议」才会填进你的路线。" % len(self.suggested))
+            elif action in ("start", "pause", "resume", "select_route", "remove_route"):
                 if data.get("revision") != self.revision:
                     raise ValueError("路线已经更新，请同步后重试。")
-                if action == "start":
-                    self.path = self._validate(data.get("path"))
-                    self.index = 0
-                    self.active = True
+                if action == "select_route":
+                    key = str(data.get("key") or "")
+                    if self._route_of(key) is None:
+                        raise ValueError("没有这条路线。")
+                    self.current = key
+                    self.status = "已切到这条路线（%d 格）。" % len(self.path)
+                elif action == "remove_route":
+                    key = str(data.get("key") or self.current)
+                    r = self._route_of(key)
+                    if r is None:
+                        raise ValueError("没有这条路线。")
+                    self.routes.remove(r)
+                    if self.current == key:
+                        self.current = self.routes[0]["key"] if self.routes else ""
+                    self.status = "已删除这条路线。"
+                elif action == "start":
+                    path = self._validate(data.get("path"))
+                    first = path[0]
+                    key = "%d,%d>%d,%d#%d" % (
+                        (self.home or (0, 0))[0], (self.home or (0, 0))[1],
+                        first[0], first[1], len(path))
+                    mode = str(data.get("mode") or "replace")
+                    existing = self._route_of(key)
+                    if mode == "add" or (existing is None and self._route_of() is not None
+                                         and self.path):
+                        # 追加一条新路线（「再加一条」），不动其他路线
+                        r = {"key": key, "path": path, "index": 0, "active": True}
+                        if existing is None:
+                            self.routes.append(r)
+                        else:
+                            existing.update(path=path, index=0, active=True)
+                        self.current = key
+                    elif existing is not None:
+                        existing.update(path=path, index=0, active=True)
+                        self.current = key
+                    else:
+                        # 编辑的是空路线（第一次提交），就地填内容
+                        r = self._ensure_route()
+                        r.update(key=key, path=path, index=0, active=True)
+                        self.current = key
                     self.status = "路线已提交，等待脚本执行。"
                 elif action == "resume":
-                    if self.index >= len(self.path):
+                    r = self._route_of(str(data.get("key") or self.current))
+                    if r is None or int(r["index"]) >= len(r["path"]):
                         raise ValueError("没有可继续的路线。")
-                    self.active = True
+                    r["active"] = True
                     self.status = "等待继续开荒。"
                 else:
-                    self.active = False
-                    self.status = "已暂停开荒。"
+                    r = self._route_of(str(data.get("key") or self.current))
+                    if r is None:
+                        raise ValueError("没有这条路线。")
+                    r["active"] = False
+                    self.status = "已暂停这条路线。"
                 self.revision += 1
+                self._route_save()
             else:
                 raise ValueError("无效的操作。")
             self.wake.set()
+
+    def scan_region(self, box):
+        """把用户框选的一片区域排进扫描队列（只刷这块，不动别的地块）。
+
+        视野一次只放得下约 11x13 格，所以按 6 格间距把区域拆成几个中心点，
+        脚本会一口气扫完；已确认占领、水域这类不需要刷的格子会在网页上继续补。
+        """
+        self.viewport = self._viewport(box)
+        x1, y1, x2, y2 = self.viewport
+        self.region = self.viewport
+        hx, hy = self.home
+        step = 6
+        centers = []
+        y = y2
+        while y >= y1:
+            x = x1
+            while x <= x2:
+                if abs(x - hx) <= SCAN_RADIUS and abs(y - hy) <= SCAN_RADIUS:
+                    centers.append((x, y))
+                x += step
+            y -= step
+        if not centers:
+            raise ValueError("这块区域里没有可读取的位置。")
+        # 注意：command() 已经持有 self.lock（这里不能再次加锁，threading.Lock 不可重入）
+        self.pending_scans = deque(centers[1:])
+        self.scan = ("point", centers[0])
+        self.status = "正在刷新你框选的区域（%d 个视野）。" % len(centers)
 
     def _viewport(self, box):
         if box is None:
@@ -214,17 +405,22 @@ class RouteMap:
         此时保持原路线不动，让调用方提示用户（不硬闯、不跳格）。
         """
         with self.lock:
-            if not self.path:
+            route = self._route_of(self._step_key) or self._route_of()
+            if route is None or not route["path"]:
                 return False
             try:
                 bad = tuple(int(v) for v in bad)
             except (TypeError, ValueError):
                 return False
-            head = self.path[:self.index]                  # 已处理的部分不动
-            rest = [p for p in self.path[self.index:] if tuple(p) != bad]
+            path = tuple(route["path"])
+            index = int(route["index"])
+            head = path[:index]                  # 已处理的部分不动
+            rest = [p for p in path[index:] if tuple(p) != bad]
             if not rest:
                 # 卡的就是最后一格：剔掉即可，路线自然结束
-                self.path = tuple(tuple(p) for p in head)
+                route["path"] = tuple(tuple(p) for p in head)
+                route["index"] = len(route["path"])
+                route["active"] = False
                 self.status = "终点打不过，已移除该格。"
                 self.revision += 1
                 return True
@@ -239,8 +435,7 @@ class RouteMap:
                 chained = rest_t
             if not chained:
                 return False
-            rest = [list(p) for p in chained]
-            self.path = tuple(tuple(p) for p in head) + tuple(tuple(p) for p in rest)
+            route["path"] = tuple(tuple(p) for p in head) + tuple(tuple(p) for p in chained)
             self.status = "已绕开 (%d,%d)，路线已重排。" % bad
             self.revision += 1
             return True
@@ -269,8 +464,38 @@ class RouteMap:
             cur = nxt
         return chain
 
+    def note_skip(self, xy, reason, auto=False):
+        """记下「这一格为什么没打」，网页上如实列出来。
+
+        用户明确要过：脚本可以跳过，但必须让他看见跳了哪格、为什么。
+        auto=True 表示是脚本自己决定跳的（不是游戏规则拦的）。
+        """
+        with self.lock:
+            entry = {"xy": [int(xy[0]), int(xy[1])], "reason": str(reason),
+                     "auto": bool(auto), "at": time.time()}
+            self.skips = [s for s in self.skips if s["xy"] != entry["xy"]]
+            self.skips.insert(0, entry)
+            del self.skips[40:]
+
+    def clear_skips(self):
+        with self.lock:
+            self.skips = []
+
+    def take_scan_peek(self):
+        """只看一眼有没有排队的地图请求，不消费。"""
+        with self.lock:
+            if self.scan:
+                return self.scan
+            if self.pending_scans:
+                return ("point", self.pending_scans[0])
+            if self.retry_scan_at and time.monotonic() >= self.retry_scan_at and self.view:
+                return ("point", self.retry_target or self.view["center"])
+            return None
+
     def take_scan(self):
         with self.lock:
+            if not self.scan and self.pending_scans:
+                self.scan = ("point", self.pending_scans.popleft())
             if not self.scan and self.retry_scan_at and time.monotonic() >= self.retry_scan_at:
                 self.scan = ("point", self.retry_target or self.view["center"]) if self.view else ("home", None)
             if not self.scan:
@@ -278,6 +503,73 @@ class RouteMap:
             request, self.scan = self.scan, None
             self.scanning = True
             return request[1], self.view is None
+
+    def _route_save(self):
+        """把所有路线存盘：脚本重启后你的路线不该消失。"""
+        if not self.home or not self.routes:
+            return
+        try:
+            ROUTE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            tmp = ROUTE_FILE.with_suffix(".tmp")
+            tmp.write_text(json.dumps({
+                "home": list(self.home),
+                "routes": [{"key": r["key"],
+                            "path": [list(p) for p in r["path"]],
+                            "index": int(r["index"]),
+                            "active": bool(r["active"])} for r in self.routes],
+                "current": self.current,
+                "at": time.time(),
+            }, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(ROUTE_FILE)
+        except OSError:
+            log.debug("路线存盘失败", exc_info=True)
+
+    def _route_load(self, home):
+        """读回上次提交的路线（同一个主城才用）。返回是否恢复成功。
+
+        兼容旧格式（单条路线存在 path/index/active/route_key 里）。
+        """
+        try:
+            data = json.loads(ROUTE_FILE.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return False
+        if list(data.get("home") or []) != list(home):
+            return False
+
+        def clean(path):
+            out = []
+            for pair in path or []:
+                if isinstance(pair, list) and len(pair) == 2 and all(type(n) is int for n in pair):
+                    out.append(tuple(pair))
+            return tuple(out)
+
+        routes = []
+        for item in data.get("routes") or []:
+            path = clean(item.get("path"))
+            if path:
+                routes.append({"key": str(item.get("key") or ""), "path": path,
+                               "index": max(0, min(int(item.get("index") or 0), len(path))),
+                               "active": bool(item.get("active"))})
+        if not routes:
+            # 旧格式：单条路线
+            path = clean(data.get("path"))
+            if path:
+                routes = [{"key": str(data.get("route_key") or ""), "path": path,
+                           "index": max(0, min(int(data.get("index") or 0), len(path))),
+                           "active": bool(data.get("active"))}]
+        if not routes:
+            return False
+        # 注意：identify() 已经持有 self.lock（threading.Lock 不可重入），这里不能再加锁
+        self.routes = routes
+        want = str(data.get("current") or "")
+        self.current = want if any(r["key"] == want for r in routes) else routes[0]["key"]
+        self.revision += 1
+        cur = self._route_of()
+        self.status = ("已恢复 %d 条路线（当前这条 %d 格，进行到第 %d 格）。"
+                       % (len(routes), len(cur["path"]), int(cur["index"]) + 1))
+        log.info("已恢复上次提交的路线：%d 条，当前这条 %d 格，继续第 %d 格",
+                 len(routes), len(cur["path"]), int(cur["index"]) + 1)
+        return True
 
     def _cache_save(self):
         """把已扫到的地图存盘，下次启动同一个账号直接复用。
@@ -359,9 +651,9 @@ class RouteMap:
     def identify(self, home):
         with self.lock:
             if self.home is not None and self.home != home:
-                self.path = ()
-                self.index = 0
-                self.active = False
+                self.routes = []       # 换主城：所有路线都作废
+                self.current = ""
+                self._step_key = ""
                 self.revision += 1
                 self.status = "主城坐标已变化，请重新读取地图并选点。"
                 self.known.clear()
@@ -373,13 +665,37 @@ class RouteMap:
             fresh = self.home != home
             self.home = home
             if fresh and not self.known:
-                # 会话里第一次认出主城：先把上次存的地图读回来，省掉重新扫描
-                n = self._cache_load(home)
-                if n:
-                    log.info("已载入上次扫到的 %d 格地图（同一主城，无需重扫）", n)
-                    self.status = "已载入上次的地图，可直接选点或补读视野。"
+                # 会话里第一次认出主城：按设置的缓存策略决定要不要沿用上次地图
+                mode = self._cache_mode()
+                if mode == "refresh":
+                    log.info("按设置不使用地图缓存，将重新读取。")
+                    self.status = "正在重新读取地图…"
+                else:
+                    n = self._cache_load(home)
+                    if n:
+                        log.info("已载入上次扫到的 %d 格地图（同一主城，无需重扫）", n)
+                        self.status = "已沿用上次的地图，可直接选点。"
+                    elif mode == "ask":
+                        self.pending_cache = True
+            if fresh and not self.path:
+                # 路线也要跟着回来：脚本重启不该让用户重新点一遍
+                self._route_load(home)
             if self.operations:
                 self.operations.identify(home)
+
+    def _cache_mode(self):
+        """从配置读缓存策略：reuse(默认沿用) / refresh(每次重读) / ask(启动时问)。
+
+        ask 模式下不自动载入，网页上会问「沿用上次缓存还是重新读取」。
+        """
+        try:
+            import yaml
+            from .vision import ROOT as _ROOT
+            cfg = yaml.safe_load(open(Path(_ROOT) / "config.yaml", encoding="utf-8")) or {}
+            mode = ((cfg.get("web") or {}).get("map_cache_mode") or "reuse").lower()
+            return mode if mode in ("reuse", "refresh", "ask") else "reuse"
+        except Exception:
+            return "reuse"
 
     def publish(self, home, center, tiles, image):
         self.identify(home)
@@ -431,7 +747,7 @@ class RouteMap:
 
     def scan_requested(self):
         with self.lock:
-            return self.scan is not None
+            return self.scan is not None or bool(self.pending_scans)
 
     def scan_failed(self, reason, retry=False, target=None):
         with self.lock:
@@ -442,9 +758,58 @@ class RouteMap:
             self.retry_target = target if retry else None
 
     def next(self):
+        """取下一条要处理的地块：在多条路线间轮转，跳过正在等待的路线。
+
+        「等待」的判据来自 state 里那一格的行军截止时间：
+        一条路线刚派兵出去，它下一格要等行军，这个空档正好用来推进别的路线。
+        全都不可推进时返回 None，脚本这一轮就不出兵（不空点）。
+        """
         with self.lock:
-            if self.active and self.index < len(self.path):
-                return self.revision, self.home, self.path[self.index]
+            if not self.home:
+                return None
+            state = None
+            try:
+                exp = getattr(self, "expand", None)
+                state = getattr(exp, "state", None)
+            except Exception:
+                state = None
+            now = time.time()
+            for r in self.routes:
+                if not r["active"]:
+                    continue
+                idx = int(r["index"])
+                path = r["path"]
+                if idx >= len(path):
+                    continue
+                xy = tuple(path[idx])
+                if state is not None:
+                    rec = state.tile(*xy) or {}
+                    if rec.get("route_home") == list(self.home):
+                        if float(rec.get("march_until") or 0) > now:
+                            continue      # 这一格还在行军，先推进别的路线
+                        if float(rec.get("retry_at") or 0) > now:
+                            continue      # 刚失败过、在退避
+                self._step_key = r["key"]
+                return self.revision, self.home, xy
+            return None
+
+    def step_route_key(self):
+        return self._step_key
+
+    def step_still_valid(self, revision):
+        """刚才那一步还是不是它自己那条路线的当前格？
+
+        多条路线轮转时不能用「next() 结果是否相同」来判断（next 可能已经转到
+        别的路线上了），只核对：版本没变、这条路线还在跑、且队首还是刚才那格。
+        """
+        with self.lock:
+            if self.revision != revision:
+                return False
+            r = self._route_of(self._step_key)
+            if r is None or not r["active"]:
+                return False
+            idx = int(r["index"])
+            return idx < len(r["path"])
 
     def confirmed_neighbor(self, point):
         x, y = point
@@ -453,13 +818,33 @@ class RouteMap:
             return any(p in home or self.known.get(p) == "owned"
                        for p in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)))
 
+    def advance(self, revision):
+        """跳过当前这一格，往后挪一个（只在明确不该打时用）。"""
+        with self.lock:
+            if self.revision != revision:
+                return
+            r = self._route_of(self._step_key) or self._route_of()
+            if r is None:
+                return
+            r["index"] = int(r["index"]) + 1
+            if int(r["index"]) >= len(r["path"]):
+                r["active"] = False
+                self.status = "这条路线已走完。"
+            self._route_save()
+
     def report(self, revision, status, occupied=False, land=False):
         with self.lock:
             if self.revision != revision:
                 return
             self.status = status
+            r = self._route_of(self._step_key) or self._route_of()
+            if r is None:
+                return
+            idx = int(r["index"])
+            if idx >= len(r["path"]):
+                return
             if occupied or land:
-                x, y = self.path[self.index]
+                x, y = r["path"][idx]
                 kind = "owned" if occupied else "land"
                 self.known[(x, y)] = kind
                 for view, _ in self.frames.values():
@@ -467,15 +852,17 @@ class RouteMap:
                         view["tiles"] = [{**t, "kind": kind} if (t["x"], t["y"]) == (x, y) else t
                                          for t in view["tiles"]]
             if occupied:
-                self.index += 1
-                if self.index == len(self.path):
-                    self.active = False
-                    self.status = "路线全部占领。"
+                r["index"] = idx + 1
+                if int(r["index"]) >= len(r["path"]):
+                    r["active"] = False
+                    self.status = "这条路线全部占领。"
+                self._route_save()   # 进度要跟着存，重启后别重打已占领的格
 
     def confirm(self, revision, click):
         """暂停或改线生效后，旧路线不能再点击出兵确认。"""
         with self.lock:
-            if self.active and self.revision == revision:
+            r = self._route_of(self._step_key) or self._route_of()
+            if r is not None and r["active"] and self.revision == revision:
                 return click()
             return None
 
@@ -533,12 +920,14 @@ class RouteMap:
                 return self.headers.get("Host") == f"127.0.0.1:{self.server.server_port}"
 
             def do_GET(self):
-                if self.local() and self.path == prefix:
+                # 浏览器会用 ?v=4 这种版本号绕缓存；路由只认路径，不能把查询串算进去
+                path = self.path.split("?", 1)[0]
+                if self.local() and path == prefix:
                     self.reply(200, "text/html; charset=utf-8", page_bytes())
-                elif self.local() and self.path == prefix + "state":
+                elif self.local() and path == prefix + "state":
                     self.reply_json(200, route.snapshot())
-                elif self.local() and self.path.startswith(prefix + "map/"):
-                    number = self.path[len(prefix + "map/"):]
+                elif self.local() and path.startswith(prefix + "map/"):
+                    number = path[len(prefix + "map/"):]
                     with route.lock:
                         item = route.frames.get(int(number)) if len(number) < 12 and number.isascii() and number.isdigit() else None
                         image = item[1] if item else b""
@@ -553,12 +942,13 @@ class RouteMap:
                 if not self.local():
                     self.reply(404, "text/plain", b"")
                     return
+                path = self.path.split("?", 1)[0]
                 # 网页上的「停止脚本」按钮
-                if self.path == prefix + "stop":
+                if path == prefix + "stop":
                     self.reply_json(200, {"stopping": True})
                     threading.Thread(target=_shutdown, daemon=True).start()
                     return
-                if self.path != prefix + "command":
+                if path != prefix + "command":
                     self.reply(404, "text/plain", b"")
                     return
                 try:
@@ -596,9 +986,14 @@ class RouteMap:
             thread.start()
             url = f"http://127.0.0.1:{server.server_port}{prefix}"
             log.info("网页开荒地图: %s", url)
-            # 把地址写到文件，桌面快捷方式/浏览器书签都用它
+            # 由控制台拉起时（open_browser=False），这个页面只是内部子服务，
+            # 绝不能把 web_url.txt 改成 8766 —— 否则用户下次照着文件打开的是
+            # 脚本子页面，脚本一停就彻底打不开，也看不到控制台的启动按钮。
+            # 对外唯一地址始终由 console.py 写成 8765。
             try:
-                (Path(CACHE).parent / "web_url.txt").write_text(url, encoding="utf-8")
+                data_dir = Path(CACHE).parent
+                name = "web_url.txt" if open_browser else "web_child_url.txt"
+                (data_dir / name).write_text(url, encoding="utf-8")
             except OSError:
                 pass
             if open_browser:

@@ -22,6 +22,8 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 PORT = 8765
 PREFIX = "/jwm/"
+# 开荒地图页的代理前缀：/map/ → 转发到脚本自己的 8766/jwm/
+MAPPFX = "/map/"
 PAGE = HERE / "jwm" / "console.html"
 LOG = HERE / "logs" / "console.log"
 
@@ -29,7 +31,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s",
                     handlers=[logging.FileHandler(LOG, encoding="utf-8"), logging.StreamHandler()])
 log = logging.getLogger("console")
 
-_state = {"proc": None, "started": 0.0, "exit": None, "log_tail": [],
+_state = {"proc": None, "started": 0.0, "exit": None, "exit_code": None, "log_tail": [],
           "seen": 0.0}   # seen = 最近一次网页轮询的时间
 _lock = threading.Lock()
 
@@ -89,6 +91,7 @@ def _start():
             env=env, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         _state["started"] = time.time()
         _state["exit"] = None
+        _state["exit_code"] = None
         log.info("已启动脚本 PID=%s", _state["proc"].pid)
         return True, "已启动"
 
@@ -111,14 +114,36 @@ def _stop():
 def _snapshot():
     running = _running()
     if not running and _state["proc"] is not None and _state["exit"] is None:
+        code = _state["proc"].poll()
+        # 以前只记「停了」，不记退出码，进程悄悄消失时查不出原因。
+        log.info("脚本已退出，退出码=%s", code)
         _state["exit"] = time.time()
+        _state["exit_code"] = code
     return {
         "running": running,
         "pid": _state["proc"].pid if running else None,
         "started": _state["started"] if running else None,
         "uptime": int(time.time() - _state["started"]) if running else 0,
+        "exitCode": _state.get("exit_code"),
         "log": _tail_run_log(),
     }
+
+
+def _offline_reply(sub):
+    """脚本没在运行时，代理该回什么。
+
+    关键：接口（state/command）必须回 JSON 且带非 2xx 状态码。以前一律回 200 HTML，
+    开荒页以为请求成功了，却解析不出 JSON，于是永远显示「等待脚本连接」。
+    """
+    path = (sub or "").split("?", 1)[0]
+    if path in ("state", "command") or path.startswith("command/"):
+        return (503, "application/json; charset=utf-8",
+                json.dumps({"error": "脚本没在运行，请回控制台点「启动脚本」。"},
+                           ensure_ascii=False).encode())
+    return (200, "text/html; charset=utf-8",
+            ("<meta charset='utf-8'><body style='background:#0E1015;color:#98A2B3;"
+             "font:14px sans-serif;padding:40px'>脚本没在运行。"
+             "回 <a style='color:#4C8DFF' href='" + PREFIX + "'>控制台</a> 点「启动脚本」。</body>").encode())
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -130,6 +155,11 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", mime)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        # 允许脚本自己的 8766 页面查询控制台「进程是否还活着」，
+        # 这样直接打开子页也能区分「启动中」和「真的没运行」。
+        origin = self.headers.get("Origin", "")
+        if origin.startswith("http://127.0.0.1:"):
+            self.send_header("Access-Control-Allow-Origin", origin)
         self.end_headers()
         try:
             self.wfile.write(body)
@@ -152,12 +182,46 @@ class Handler(BaseHTTPRequestHandler):
             _state["seen"] = time.time()
             self._reply(200, "application/json; charset=utf-8",
                         json.dumps(_snapshot(), ensure_ascii=False).encode())
+        elif self.path.startswith(MAPPFX):
+            # 开荒地图页通过 /map/ 前缀整体转发到脚本的 8766。
+            # 页面里所有相对请求（state / map/xx / command）都基于 /map/，
+            # 所以这里把它们原样拼接回去，保证页面只认 8765 一个地址。
+            self._proxy_script(self.path[len(MAPPFX):])
         else:
             self._reply(404, "text/plain", b"")
+
+    def _proxy_script(self, sub):
+        """转发到脚本自己的网页。脚本没跑就返回一句提示。
+
+        注意：子服务明确返回的 4xx/5xx（例如「地图正在读取，请稍等」）必须原样转发，
+        不能吞成「脚本没在运行」—— 以前就是这么吞的，网页把错误对象当成状态，
+        于是既看不到错误原因，又误以为脚本挂了。
+        """
+        import urllib.error
+        import urllib.request
+        url = "http://127.0.0.1:8766/jwm/" + sub
+        try:
+            with urllib.request.urlopen(url, timeout=10) as r:
+                body = r.read()
+                ctype = r.headers.get("Content-Type", "text/plain")
+            self._reply(200, ctype, body)
+        except urllib.error.HTTPError as e:
+            body = e.read() or b""
+            ctype = e.headers.get("Content-Type", "application/json; charset=utf-8") if e.headers else "application/json; charset=utf-8"
+            self._reply(e.code, ctype, body)
+        except (urllib.error.URLError, OSError):
+            code, mime, body = _offline_reply(sub)
+            self._reply(code, mime, body)
 
     def do_POST(self):
         if not self._local():
             self._reply(404, "text/plain", b"")
+            return
+        # 开荒页的 POST（比如网页上点开始开荒）也转发过去
+        if self.path.startswith(MAPPFX):
+            length = int(self.headers.get("Content-Length", "0") or 0)
+            body = self.rfile.read(length) if 0 < length <= 65536 else b""
+            self._proxy_post(self.path[len(MAPPFX):], body)
             return
         if self.path == PREFIX + "start":
             ok, msg = _start()
@@ -168,6 +232,27 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._reply(200, "application/json; charset=utf-8",
                     json.dumps({"ok": ok, "message": msg, ** _snapshot()}, ensure_ascii=False).encode())
+
+    def _proxy_post(self, sub, body):
+        import urllib.error
+        import urllib.request
+        url = "http://127.0.0.1:8766/jwm/" + sub
+        req = urllib.request.Request(url, data=body, method="POST",
+                                     headers={"Content-Type": self.headers.get("Content-Type", "application/json")})
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                data = r.read()
+                ctype = r.headers.get("Content-Type", "application/json")
+            self._reply(200, ctype, data)
+        except urllib.error.HTTPError as e:
+            # 子服务的 400（比如「地图正在读取，请稍等」）要原样给前端，否则只显示「脚本没在运行」
+            data = e.read() or b""
+            ctype = e.headers.get("Content-Type", "application/json") if e.headers else "application/json"
+            self._reply(e.code, ctype, data)
+        except (urllib.error.URLError, OSError):
+            self._reply(503, "application/json; charset=utf-8",
+                        json.dumps({"error": "脚本没在运行，请回控制台点「启动脚本」。"},
+                                   ensure_ascii=False).encode())
 
 
 def _open_browser(url):

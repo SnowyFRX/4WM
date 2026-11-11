@@ -28,7 +28,23 @@ class State:
         with self.lock:
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(self.data, f, ensure_ascii=False, indent=1)
-            os.replace(tmp, self.path)
+            # OneDrive / 杀毒软件会短暂锁住文件，os.replace 抛 WinError 5。
+            # 原来一次失败就把整个任务打成 ERROR，实测在训练任务里直接中断。
+            for attempt in range(5):
+                try:
+                    os.replace(tmp, self.path)
+                    return
+                except PermissionError:
+                    if attempt == 4:
+                        break
+                    time.sleep(0.15 * (attempt + 1))
+            # 实在换不了，只能直接覆盖目标文件（牺牲原子性，但别让任务崩掉）
+            with open(self.path, "w", encoding="utf-8") as f:
+                json.dump(self.data, f, ensure_ascii=False, indent=1)
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
 
     # ---- 地块 ----
     def tile(self, x, y):

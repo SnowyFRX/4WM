@@ -176,15 +176,24 @@ class Recruit:
 
         self.bot.phase("正在打开所有军队面板")
         armies = {}
+        complete = {}         # 该队的士兵区是否完整进入过视野
         sc = self.bot.chests.open_army_panel()
         per_page = 4          # 军队面板一屏固定放 4 张卡（实测）
         card_h = 176          # 卡片行高（实测）
         pages = 1
+        no_new = 0            # 连续几屏没出现新编队（用来判断真的到底了）
         for page in range(1, 25):
             self.bot.phase(f"正在读取军队面板第 {page} 屏")
             # 关键：解析和裁图必须用同一张截图。翻页后 ny 会变，跨屏混用会截到别的卡片。
             items, owned, _cap = parse_armies(sc)
+            fresh = 0
             for it in items:
+                if it["name"] not in armies:
+                    fresh += 1
+                # 卡片贴屏幕底边时，士兵图会被截断/截不到。只有 y2 在屏幕内才算完整。
+                # 之前只看“名字都读到了”就 break，编队4刚好在底边，于是永远是 0/9 没图。
+                name = it["name"]
+                complete[name] = bool(complete.get(name)) or (it["ny"] + 95 <= 1080)
                 strip = it.get("units_img")
                 png = ""
                 if strip is not None and strip.size:
@@ -205,7 +214,16 @@ class Recruit:
                     "chests": it["chests"] or prev.get("chests", 0),
                     "units": png or prev.get("units", ""),
                 }
-            if owned is not None and len(armies) >= owned:
+            seen_all = owned is not None and len(armies) >= owned
+            # 名字见全了还不够：每一队的士兵区都得完整出现过。
+            # 只要有一队还贴在屏幕底边，就继续往下滑一屏再读。
+            if seen_all and all(complete.get(n) for n in armies):
+                break
+            # 连续两屏都没出现新编队 = 真的到底了。
+            # 以前只靠「页面完全没变化」判停，滑到尽头后同一批卡片被反复解析，
+            # 于是出现「6 支（拥有 5）」这种自相矛盾、还带假条目的读数。
+            no_new = 0 if fresh else no_new + 1
+            if no_new >= 2:
                 break
             # 每次只滑一张卡的高度：一屏 4 张，9 支就要滑 8 次。
             # 滑太多会把夹在屏与屏之间的那张整个跳过（「挨揍」就是这么丢的）。
@@ -214,7 +232,18 @@ class Recruit:
             sc = self.ui.grab()
             if self.ui._same(old.img, sc.img, tol=0.8):
                 break
-        log.info("读取编队完成：%d 支（拥有 %s）", len(armies), owned)
+        # 读到的条目比「拥有 N 支」还多，说明有伪造条目混进来：只保留有名字且有内容的
+        if owned is not None and len(armies) > owned:
+            log.info("读到 %d 支多于编队总数 %d，丢弃没有位置/兵力的伪条目", len(armies), owned)
+            real = {n: v for n, v in armies.items()
+                    if (v.get("location") or v.get("soldiers") or v.get("units"))}
+            while len(real) > owned:
+                real.popitem()
+            if real:
+                armies = real
+        missing = [n for n in armies if not complete.get(n)]
+        log.info("读取编队完成：%d 支（拥有 %s）%s", len(armies), owned,
+                 "，未读全：" + "、".join(missing) if missing else "")
         self.ui.to_map()
         return armies
 
@@ -228,7 +257,11 @@ class Recruit:
         for name, (_, count, away) in cards.items():
             item = armies.setdefault(name, {})
             item.update(count=count, away=away)
-            item.setdefault("state", "外出" if away else "在主城")
+            # 兵营卡片只知道「在队里/外出」，不知道行军中还是驻守中。
+            # 以前这里直接写「在主城/外出」，把刚读到的真实状态盖掉了，
+            # 网页于是一直显示笼统的「在主城」，看着像不同步。
+            if not item.get("state"):
+                item["state"] = "外出" if away else "在主城"
         ok, strip = cv2.imencode(".jpg", sc.img[SLOT_Y-42:SLOT_Y+42, 58:596])
         self.bot.operations.observe(armies=armies, armySlots=self.army_slots(sc),
                                     gameRecruit=self.queue(sc),
@@ -256,7 +289,11 @@ class Recruit:
                 ops.message("recruit", job, f"等待{name}回到主城。")
                 return 0
             if not self.is_unlocked(sc.img, slot):
-                ops.message("recruit", job, f"第 {slot} 格兵种尚未解锁。")
+                # 兵种没解锁 = 这个任务当前根本做不到。
+                # 以前只是 return 0，任务永远留在队列里，每 120 秒重试一次、每次都白跑，
+                # 表现就是「recruit 一直在跑却什么都不做」。现在明确暂停并告诉你。
+                ops.message("recruit", job, f"第 {slot} 格兵种尚未解锁，该任务已暂停（解锁后会自动继续）。")
+                ops.guard("recruit", 3600, f"{name} 的第 {slot} 格兵种未解锁。")
                 return 0
             if not self.slot_selected(sc.img, slot):
                 self.dev.tap(SLOT_X[slot - 1], SLOT_Y, delay=0.8)
@@ -396,8 +433,15 @@ class Recruit:
                 break
             slots = new_slots
         # 在外面的缺员编队：先调回主城（只能给在主城的编队招兵），到了再补满
+        # 注意：正在战斗/行军中的绝不召回 —— 那是打断出征，不是补兵。
         if understrength and not self.queue_full:
-            log.info("在外面缺员的编队：%s，调回主城补兵", "、".join(understrength))
+            busy = set(self.bot.expand._busy_armies())
+            hold = [n for n in understrength if n in busy]
+            understrength = [n for n in understrength if n not in busy]
+            if hold:
+                log.info("这些编队正在战斗/行军，先不召回补兵：%s", "、".join(hold))
+        if understrength and not self.queue_full:
+            log.info("在外面缺员且空闲的编队：%s，调回主城补兵", "、".join(understrength))
             self.ui.to_map()
             back = self.bot.expand.recall(names=understrength)
             wait_max = self.cfg.get("recall_wait_max", 90)

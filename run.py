@@ -7,9 +7,14 @@
     python run.py plan            # 不出兵，画出开荒计划 logs/plan.png（圈数、尝试顺序）
     python run.py screen          # 识别当前界面并打印 OCR 结果
 """
+import faulthandler
 import logging
 import os
 import sys
+
+# 原生库（onnxruntime）崩溃时 Python 不会打 traceback，进程会直接消失。
+# 打开 faulthandler 后至少能在 run_live.log 里留下崩溃时的线程栈。
+faulthandler.enable(all_threads=True)
 
 from jwm.bot import Bot, load_config
 from jwm.vision import ROOT

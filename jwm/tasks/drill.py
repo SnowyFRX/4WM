@@ -36,6 +36,30 @@ class Drill:
         return self.bot.cfg.get("drill") or {}
 
     # ---------------- 打开校场 ----------------
+    # 医馆/招兵也用「选择军队」当表头，只看这四个字会把医馆当校场（真机踩过：
+    # 日志说在练兵，实际打开的是「治疗伤兵」面板，于是一个兵都点不到、全是空试）。
+    HEAL_WORDS = r"治疗费用|治疗队列|伤兵|治疗伤兵"
+    DRILL_WORDS = r"训练费用|训练队列|训练士兵|校场"
+
+    @classmethod
+    def looks_like_drill(cls, sc):
+        """这个「选择军队」面板是不是校场？医馆一律不算。
+
+        判据：出现校场专有字样（训练费用/训练队列/训练士兵），
+        或者下面那一排兵种头像能被识别出来（校场特有的 UI）。
+        """
+        if sc.text(cls.HEAL_WORDS):
+            return False
+        if not sc.text(r"选择军队"):
+            return False
+        if sc.text(cls.DRILL_WORDS) or sc.text(r"^训练$"):
+            return True
+        try:
+            return len(cls.avatar_centers(sc.img)) >= 2
+        except Exception:
+            log.debug("头像行识别失败", exc_info=True)
+            return False
+
     def open_drill(self):
         from .build import find_badges
         sc = self.ui.to_city()
@@ -58,10 +82,20 @@ class Drill:
             if not sc.text(r"选择军队"):
                 if self.ui.tap_text(sc, r"^训练士兵$", delay=1.2):
                     sc = self.ui.grab()
-            if sc.text(r"选择军队"):
+            if self.looks_like_drill(sc):
                 self.bot.state.data.setdefault("building_pos", {})["校场"] = [bx, by]
                 self.bot.state.save()
                 return sc
+            if sc.text(self.HEAL_WORDS):
+                log.debug("点开的是医馆（治疗伤兵），不是校场，换下一个候选")
+                # 缓存串位（真机实测：校场和医馆存成了同一个坐标 [292,680]）时，
+                # 这条缓存会把每次练兵都带到医馆。作废它，让下面的图标扫描重新找。
+                pos_map = self.bot.state.data.get("building_pos") or {}
+                if tuple(pos_map.get("校场") or ()) == (bx, by):
+                    pos_map.pop("校场", None)
+                    self.bot.state.data["building_pos"] = pos_map
+                    self.bot.state.save()
+                    log.info("校场缓存位置其实是医馆，已作废，重新寻找校场")
             self.ui.close()
         return None
 
@@ -181,10 +215,96 @@ class Drill:
         return None, "校场里没找到这张编队卡片"
 
     # ---------------- 训练 ----------------
+    @staticmethod
+    def button_ready(sc, btn):
+        """训练按钮是否亮着（灰按钮 = 资源/队列/等级不满足，点了也白点）。"""
+        x1, y1, x2, y2 = btn.box
+        roi = sc.img[max(0, y1):y2, max(0, x1):x2].astype(int)
+        if not roi.size:
+            return False
+        r, g, b = roi[..., 2], roi[..., 1], roi[..., 0]
+        yellow = (r > 190) & (g > 135) & (b < 200)
+        return float(yellow.mean()) > 0.15
+
+    @staticmethod
+    def parse_cost(text):
+        """把面板上的「训练费用 …」拆成 {amounts: [...], duration: "0:30"}。
+
+        面板上费用是一串数字（可能带千分位），后面跟时长。这里不猜它是哪种资源
+        （游戏只画图标不写名字），只把数字拿出来，供 shortfall 和日志使用。
+        """
+        out = {"amounts": [], "duration": ""}
+        for token in re.findall(r"\d+:\d{2}(?::\d{2})?|[\d,]+", str(text or "")):
+            token = token.strip().replace(" ", "")
+            if not token:
+                continue
+            if re.fullmatch(r"\d+:\d{2}(?::\d{2})?", token):
+                if not out["duration"]:
+                    out["duration"] = token
+                continue
+            raw = token.replace(",", "")
+            if raw.isdigit():
+                out["amounts"].append(int(raw))
+        return out
+
+    @staticmethod
+    def shortfall(amounts, have, keys=("grain", "wood", "stone"), min_amount=10):
+        """按「已有资源 vs 本次所需」算出缺口，返回可读的缺口说明列表。
+
+        资源读数缺失时不拦人：宁可试一次，也不能凭空说资源不足。
+        面板费用只画图标不写名字，脚本不猜种类；用「最少的那个基础资源」做对位比较：
+        连最富裕的资源都够不上这个数字时，几乎必然被游戏拒绝；只要最少的那种都够，就放行。
+        min_amount 用来挡掉误抓的小数字：真机日志出现过 `[636, 1]`，那个 1 是旁边的
+        等级/数量文字，不是费用（训练费用不会是个位数）。
+        """
+        gaps = []
+        known = {k: int(v) for k, v in (have or {}).items()
+                 if k in keys and isinstance(v, (int, float))}
+        if not known:
+            return gaps          # 没读到资源，不做判断
+        lowest = min(known.values())
+        for need in amounts or []:
+            if need < min_amount:
+                continue         # 明显是等级/数量，不是费用
+            if need > lowest:
+                gaps.append("需要 %d，当前最少只有 %d" % (need, lowest))
+        return gaps
+
+    @staticmethod
+    def verify_training_click(sc):
+        """点过「训练」之后读回执：游戏拒绝时不能算成功。
+
+        真机证据（logs/shots/1111_180223_err_drill.png）：资源不够时游戏弹
+        「资源不足 536/580」。旧代码只认元宝类提示，于是把空试当成功。
+        """
+        if sc.text(r"元宝|立即完成|购买"):
+            return False, "游戏提示花元宝，已取消"
+        if sc.text(r"资源不足|资源不够|不足"):
+            return False, "resource"
+        return True, ""
+
+    @staticmethod
+    def training_cost(sc):
+        """读面板上已经写好的训练费用/时长，别靠反复试。"""
+        anchor = sc.text(r"训练费用")
+        if not anchor:
+            return ""
+        top = anchor.center[1]
+        parts = []
+        for b in sc.boxes:
+            if not (top - 5 <= b.center[1] <= top + 150):
+                continue
+            t = b.text.strip().replace(" ", "")
+            if re.fullmatch(r"[\d,]+", t) or re.fullmatch(r"\d+:\d{2}(:\d{2})?", t):
+                parts.append(t)
+        return " / ".join(dict.fromkeys(parts))
+
     def train_soldier(self, x):
         """选中第 x 个兵并训练。返回 (ok, 说明)。"""
         self.dev.tap(x, AVATAR_Y, delay=0.6)
         sc = self.ui.grab()
+        cost = self.training_cost(sc)
+        parsed = self.parse_cost(cost)
         # 兵营等级不够 / 资源不够 / 已满级时，“训练”按钮根本不会出现
         btn = sc.text(r"^训练$")
         if not btn:
@@ -197,12 +317,39 @@ class Drill:
                 return False, "点开的是兵种详情（英雄位）"
             eff = " ".join(b.text for b in sc.boxes if 590 < b.center[1] < 700).strip()
             return False, eff or "这个兵现在训不了"
+        if parsed["amounts"]:
+            log.debug("    兵@%d 面板费用/时长：%s / %s（按 >=10 的数字判断）", x,
+                      parsed["amounts"], parsed["duration"] or "-")
+        if not self.button_ready(sc, btn):
+            return False, "训练按钮是灰的" + ("（费用 %s）" % cost if cost else "（资源/队列不足）")
+        # 点之前先用已有资源对一遍：明显不够就别点了，省掉一次必然被拒的空试
+        have = self._resources()
+        gaps = self.shortfall(parsed["amounts"], have)
+        if gaps:
+            log.info("    兵@%d 资源不够，先不点：%s（现有 %s）", x, "、".join(gaps), have)
+            return False, "resource"
         self.dev.tap(*btn.center, delay=1.6)
         sc = self.ui.grab()
-        if sc.text(r"元宝|立即完成|购买"):
-            self.ui.close(sc)  # 不花元宝
-            return False, "游戏提示花元宝，已取消"
+        ok, why = self.verify_training_click(sc)
+        if not ok:
+            if why == "resource":
+                # 记下游戏写的真实缺口（画面上的「536/580」），方便判断要等多久
+                gap = sc.text(r"\d+\s*/\s*\d+")
+                log.info("    兵@%d 游戏回了「资源不足」%s，这次不算训练成功", x,
+                         "：" + gap.text.strip() if gap else "")
+            else:
+                self.ui.close(sc)   # 不花元宝
+            return False, why
         return True, ""
+
+    def _resources(self):
+        """网页/机器人读到的当前资源（读不到返回空字典，让 shortfall 不拦人）。"""
+        try:
+            facts = (self.bot.operations.facts if self.bot.operations else {}) or {}
+            return ((facts.get("resources") or {}).get("amounts") or {})
+        except Exception:
+            log.debug("读取资源快照失败", exc_info=True)
+            return {}
 
     def queued_drill(self, job):
         """按网页队列训练指定编队。返回训练了几个兵。
@@ -242,7 +389,11 @@ class Drill:
             ops.message("drill", job, f"未选中{name}：{why}")
             self.ui.to_map()
             return 0
-        got, blocked = self._train_army_checked(name, limit=want)
+        slot = int(job.get("slot") or 0)
+        if slot:
+            self.bot.phase(f"正在训练{name}第 {slot} 个兵（读取面板费用和时长）")
+        got, blocked = self._train_army_checked(name, limit=want, slot=slot)
+        who = f"{name} 第 {slot} 个兵" if slot else name
         if got:
             self.bot.state.inc("trained", got)
             self.bot.state.data["drill_last_ok"] = time.time()
@@ -250,29 +401,53 @@ class Drill:
             self.bot.state.save()
             k = self.bot.state.reset_hard()
             ops.complete("drill", job, spent=got)
-            ops.message("drill", job, f"{name} 训练了 {got} 个兵。")
+            ops.message("drill", job, f"{who} 训练了 {got} 个。")
             if k:
                 log.info("  兵练上了，之前打不动的 %d 块地解除冷却", k)
         elif blocked == "resource":
             # 资源不足：这是“无意义尝试”的典型来源，暂停队列等资源恢复
-            ops.message("drill", job, f"{name} 资源不足，暂停练兵等资源恢复。")
+            have = self._resources()
+            detail = ("资源不够（粮 %s / 木 %s / 石 %s）" %
+                      (have.get("grain", "?"), have.get("wood", "?"), have.get("stone", "?"))
+                      if have else "面板费用不足或按钮是灰的")
+            ops.message("drill", job, f"{who} {detail}，暂停练兵等资源恢复。")
             ops.guard("drill", self.cfg.get("resource_wait_seconds", 600), "资源不足，暂停练兵。")
         elif blocked == "queue":
             ops.message("drill", job, "训练队列已满，稍后继续。")
             ops.guard("drill", 180, "训练队列已满。")
         else:
-            ops.message("drill", job, f"{name} 暂时没有可训练的兵。")
+            ops.message("drill", job, f"{who} 这个兵种训练不了（看面板费用/解锁条件）。")
             ops.guard("drill", 300, "没有可训练的兵。")
         self.ui.to_map()
         return got
 
-    def _train_army_checked(self, name, limit=9):
+    def _train_army_checked(self, name, limit=9, slot=0):
         """训练到 limit 个为止。返回 (训练数, 阻断原因)。
 
-        阻断原因：resource=资源不足（训练按钮不出现且提示费用不足）、
-        queue=训练队列满、None=正常结束。
+        slot=1..5 时只练用户指定的那个兵种，不再从左往右挨个试。
+        阻断原因：resource=资源不足/按钮灰、queue=训练队列满、None=正常结束。
         """
         got = 0
+        if slot:
+            # 头像条可能被上次翻页留在中间，先滑回最左，保证第 N 个就是用户选的第 N 格
+            for _ in range(3):
+                before = tuple(self.avatar_centers(self.ui.grab().img))
+                self.dev.swipe(150, AVATAR_Y, 650, AVATAR_Y, 300, delay=0.6)
+                if tuple(self.avatar_centers(self.ui.grab().img)) == before:
+                    break
+            centers = self.avatar_centers(self.ui.grab().img)
+            if len(centers) < slot:
+                return 0, None
+            x = centers[slot - 1]
+            for _ in range(limit):
+                ok, why = self.train_soldier(x)
+                if not ok:
+                    return got, ("resource" if why == "resource" or (why and ("资源" in why or "灰" in why or "不足" in why)) else None)
+                got += 1
+                q = self.queue(self.ui.grab())
+                if q and q[0] >= q[1]:
+                    return got, ("queue" if got < limit else None)
+            return got, None
         last_slide = None
         for _round in range(4):
             sc = self.ui.grab()
@@ -284,7 +459,7 @@ class Drill:
                     continue
                 ok, why = self.train_soldier(x)
                 if not ok:
-                    if why and ("资源" in why or "不足" in why):
+                    if why == "resource" or (why and ("资源" in why or "不足" in why)):
                         return got, "resource"
                     log.debug("    兵@%d 没训：%s", x, why)
                     continue

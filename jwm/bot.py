@@ -58,6 +58,10 @@ class Bot:
 
         self.chests = Chests(self)
         self.expand = Expand(self)
+        # 让网页能读写「打不动地块怎么办」这个开关
+        if self.route is not None:
+            self.route.expand = self.expand
+            self.route.route_mode = str(self.cfg.get("expand", {}).get("route_mode", "strict"))
         self.build = Build(self)
         self.recruit = Recruit(self)
         self.quests = Quests(self)
@@ -76,15 +80,20 @@ class Bot:
         }
 
     def army_snapshot(self, force=False):
-        """读一次编队状态（90 秒缓存），供练兵/治疗判断谁“在主城待机”。
+        """读一次编队状态（默认 20 秒缓存），供练兵/治疗/开荒判断谁“在主城待机”。
 
-        借用 recruit.read_armies() 的军队面板读取，结果 {名字: {state, location}}。
+        以前缓存 90 秒，网页上的「待机中」能压住一整分半——队伍早就出门了还显示待机，
+        所以用户看到的状态总是不实时。现在默认 20 秒，且可在 config 里改。
         """
-        if not force and time.time() - self._army_age < 90:
+        ttl = float((self.cfg.get("army") or {}).get("snapshot_seconds", 20))
+        if not force and self._armies_cache and time.time() - self._army_age < ttl:
             return
         try:
             self._armies_cache = self.recruit.read_armies() or {}
             self._army_age = time.time()
+            # 把读取时间也交给网页：状态到底是「刚刚」还是「两分钟前」要说得清
+            if self.operations:
+                self.operations.observe(armyAt=self._army_age, snapshotSeconds=ttl)
         except Exception as e:
             log.debug("编队状态读取失败: %s", e)
 
@@ -197,9 +206,11 @@ class Bot:
         idle = sched.get("idle_seconds", 20)
         log.info("开始运行，任务: %s", ", ".join(enabled))
         while True:
+            # 地图扫描是有状态的慢活（要回城、拖镜头、拼图），一旦开始就做完，
+            # 不再像以前那样在每个任务前插一次、把一次扫描切成几段（那样看起来在做一半就跑去干别的）。
             if self.route:
                 self.route.wake.clear()
-                self.scan_route_map()
+                self.run_map_scan()
                 if self.route_waiting_for_game:
                     self.route.wake.wait(idle)
                     continue
@@ -207,10 +218,6 @@ class Bot:
                 self.observe_resources()
             ran = False
             for name in enabled:
-                if self.route:
-                    self.scan_route_map()
-                    if self.route_waiting_for_game:
-                        break
                 if name == "expand" and self.in_quiet_hours():
                     continue
                 new_route = name == "expand" and self.expand.route_pending()
@@ -234,6 +241,15 @@ class Bot:
                     self.route.wake.wait(idle)
                 else:
                     time.sleep(idle)
+
+    def run_map_scan(self):
+        """把网页请求的地图扫描一口气做完（含预读四角），中途不切去别的任务。"""
+        while True:
+            if not self.scan_route_map():
+                return
+            # 扫描过程中网页可能又提了新请求（比如拖动了视野），继续做完再返回
+            if self.route and self.route.take_scan_peek() is None:
+                return
 
     def scan_route_map(self, prefetch=True):
         from .route_camera import GameNotReady, HomeUnavailable
@@ -303,7 +319,8 @@ class Bot:
     def refresh_operations(self):
         if not self.operations.take_refresh():
             return
-        self.phase("正在刷新军队和建筑状态", "refresh")
+        # 步骤带序号，网页上一眼能看出现在做到第几步、还剩几步
+        self.phase("刷新 1/4：正在读军队面板（编队兵力和位置）", "refresh")
         error = ""
         armies = {}
         try:
@@ -313,16 +330,37 @@ class Bot:
             log.debug("网页军队刷新失败", exc_info=True)
             error = "军队面板读取未完成，可手动刷新。"
         try:
-            # 读建筑面板会花一段时间，在关闭单个面板后优先处理网页补图。
-            self.scan_route_map()
-            self.phase("正在读取城内建筑等级", "refresh")
-            self.build.scan(after_panel=self.scan_route_map)
-            self.scan_route_map()
-            self.phase("正在核对兵营和可用兵种", "refresh")
+            self.phase("刷新 2/4：正在读取建筑等级", "refresh")
+            # 建筑等级只首次读一遍并缓存；以后启动直接用缓存。
+            # 用户下达升级命令时，queued_upgrade 只核对那一座，不再全城逐座点。
+            if not self.build.load_cache():
+                self.phase("刷新 2/4：首次读取建筑等级（只读这一次）", "refresh")
+                self.build.scan()
+            self.phase("刷新 3/4：正在核对兵营和可用兵种", "refresh")
             self.recruit.refresh(armies)
         except Exception:
             log.debug("网页建筑和军队刷新失败", exc_info=True)
             error = "游戏状态读取未完成，可手动刷新。"
         finally:
             self.operations.refreshed(error)
-            self.phase(error or "军队和建筑状态已更新", "refresh", "error" if error else "done")
+            self.autotune()
+            self.phase("刷新 4/4：" + (error or "全部完成，状态已更新"), "refresh",
+                       "error" if error else "done")
+
+    def autotune(self):
+        """按账号现状自动调整参数（主城等级、编队兵力变了就跟着变）。
+
+        只覆盖 config 里为 null 的项，你自己写的数字不动。
+        """
+        if not self.operations:
+            return
+        try:
+            from . import autotune as AT
+            changed, profile = AT.apply(self.cfg, self.operations.facts)
+            if profile:
+                self.operations.observe(autotune=profile)
+            if changed:
+                self.operations.observe(
+                    autotuneChanged=["%s=%s" % (p.split(".")[-1], v) for p, v in changed])
+        except Exception:
+            log.debug("自动调整参数失败", exc_info=True)

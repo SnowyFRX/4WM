@@ -70,14 +70,36 @@ class EmulatorConsole:
             pass
 
 
+def _adb_env():
+    """给 adb 一个可写的临时目录。
+
+    真机踩到的坑（2026-11-11）：进程继承到的 TMP 指向
+    `C:\\Users\\...\\DSH~1\\ascii\\tmp`，adb 连 adb.log 都写不进去，于是
+    「cannot open ... adb.log: Permission denied / failed to start daemon」，
+    截图全部超时。这里把 TMP/TEMP 固定到项目内 logs/adb_tmp（一定可写）。
+    """
+    try:
+        from .vision import ROOT
+        base = os.path.join(ROOT, "logs", "adb_tmp")
+    except Exception:
+        base = os.path.join(tempfile.gettempdir(), "jwm_adb_tmp")
+    try:
+        os.makedirs(base, exist_ok=True)
+    except OSError:
+        base = tempfile.gettempdir()
+    env = dict(os.environ)
+    env["TMP"] = env["TEMP"] = base
+    return env
+
+
 class Shell:
     """常驻 adb shell，省掉每次启动 adb 进程的开销。"""
 
     MARK = b"__JWM_END__"
 
-    def __init__(self, adb_cmd):
+    def __init__(self, adb_cmd, env=None):
         self.p = subprocess.Popen(adb_cmd + ["shell"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                  stderr=subprocess.STDOUT, bufsize=0)
+                                  stderr=subprocess.STDOUT, bufsize=0, env=env or _adb_env())
         self.lock = threading.Lock()
         self.run("true")
 
@@ -147,7 +169,8 @@ class Device:
         return cmd + list(args)
 
     def _run(self, args, with_serial=True, check=True, timeout=30):
-        r = subprocess.run(self._cmd(args, with_serial), capture_output=True, timeout=timeout)
+        r = subprocess.run(self._cmd(args, with_serial), capture_output=True, timeout=timeout,
+                           env=_adb_env())
         if check and r.returncode != 0:
             raise RuntimeError("adb 失败: %s\n%s" % (" ".join(args), r.stderr.decode("utf-8", "ignore")))
         return r.stdout

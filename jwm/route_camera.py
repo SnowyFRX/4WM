@@ -22,6 +22,54 @@ ATLAS_HUD = (
     (0, 1070, 720, MAP_BOTTOM),  # 长度随文字变化的任务提示
 )
 
+# 检测到弹窗时，这一整块都不算干净地图（主城展开的编队信息就在中间）。
+POPUP_BAND = (40, 430, 680, 1090)
+
+
+def _overlap(a, b):
+    return not (a[2] <= b[0] or b[2] <= a[0] or a[3] <= b[1] or b[3] <= a[1])
+
+
+def tile_clear_of_hud(x1, y1, x2, y2, overlays=()):
+    """这个地块框是否完全避开固定 HUD 和本帧检测到的弹窗。"""
+    box = (x1, y1, x2, y2)
+    for region in tuple(ATLAS_HUD) + tuple(overlays or ()):
+        if _overlap(box, region):
+            return False
+    return True
+
+
+def popup_covering(overlays, box):
+    """返回盖住这个地块框的第一个弹窗区域（没有则 None）。"""
+    for region in overlays or ():
+        if _overlap(tuple(box), tuple(region)):
+            return tuple(region)
+    return None
+
+
+def frame_overlays(sc):
+    """这一帧上盖着哪些面板/弹窗 —— 拼图前要避开它们。
+
+    真机踩过的坑：点开主城时展开的编队信息、战斗预测、资源不足提示，
+    都会被当成干净地图截进去，拼出来的图带着游戏 UI。
+    """
+    try:
+        from .ui import UI
+
+        if UI.has_home_popup(UI.__new__(UI), sc):
+            return [POPUP_BAND]
+        if sc.text(r"选择要出战的军队|选择要前往的军队|选择要屯田的军队|战斗预测"):
+            return [POPUP_BAND]
+        if sc.text(r"资源不足|奖励点不足|背包容量不足|库房容量不足"):
+            return [POPUP_BAND]
+        if sc.text(r"所有军队|拥有军队|建筑信息|建筑列表|招募士兵"):
+            return [POPUP_BAND]
+        if sc.text(r"点击任意位置继续|攻占成功"):
+            return [POPUP_BAND]
+    except Exception:
+        log.debug("弹窗检测失败，本帧按干净地图处理", exc_info=True)
+    return []
+
 
 class GameNotReady(ValueError):
     pass
@@ -111,8 +159,16 @@ class RouteCamera:
             raise GameNotReady("游戏正在重连或需要更新，进入大地图后再读取。")
         if kind in ("login", "agreement", "updating", "reconnect", "unknown"):
             raise GameNotReady("等待进入游戏大地图，进入后会自动定位主城。")
-        if kind != "map":
+        if kind != "map" or ui.has_tile_popup(sc):
             sc = ui.to_map(auto_login=False)
+        # 关键：军队面板/建筑面板这类全屏浮层会盖住地图，此时算出来的主城位置是错的。
+        # 之前就是在这种画面上找主城，点下去点到面板上，于是一直「定位不到主城」。
+        for _ in range(2):
+            if ui.classify(sc) == "map" and not ui.has_tile_popup(sc):
+                break
+            sc = ui.to_map(auto_login=False)
+        if ui.classify(sc) != "map":
+            raise HomeUnavailable("地图被面板挡住，已尝试关闭但没成功，稍后重试。")
         self.expand.anchor = None
         grid, point = self.expand.home_view(sc, shortcut_center=True)
         if point:
@@ -137,21 +193,48 @@ class RouteCamera:
         detail = parse_popup(sc)
         home = popup_position(sc, detail)
         selected = ui.has_tile_popup(sc)
+
+        # 主城弹窗和普通地块不一样：它没有「攻占」，而是「进入 / 行军」两个按钮，
+        # 标题显示的是玩家名 + 坐标。以前只按「攻占」判，于是主城永远认不出来
+        # （表现就是一直「定位不到主城」）。这里单独认一次主城弹窗。
+        if not selected and not home:
+            coord = None
+            for b in sc.boxes:
+                import re as _re
+                m = _re.fullmatch(r"\(?\s*(\d+)\s*[,，]\s*(\d+)\s*\)?", b.text.replace(" ", ""))
+                if m:
+                    coord = (int(m.group(1)), int(m.group(2)))
+                    break
+            has_enter = sc.text(r"^进入$") is not None
+            has_march = sc.text(r"^行军$") is not None
+            if coord and has_enter and has_march:
+                home = coord
+                selected = True
+
         clean = ui.close(sc) if selected else sc
         if (not selected or not home or not 1.5 * mv.TILE < detail.span < 2.7 * mv.TILE
                 or detail.has_attack or ui.classify(clean) != "map"):
-            return None
-        expected = detail.center[0] - mv.TILE / 2, detail.center[1] + mv.TILE / 2
+            # 主城弹窗的选中框宽度可能量不准，允许 span 未知（0）时继续
+            if not (selected and home and detail.span == 0 and ui.classify(clean) == "map"):
+                return None
+        expected = None
+        if detail.center:
+            expected = (detail.center[0] - mv.TILE / 2, detail.center[1] + mv.TILE / 2)
         try:
             grid = mv.MapGrid(clean.img, classify=False)
         except ValueError:
             grid = None
         ij = grid.find_city() if grid is not None else None
         city = grid.tiles[(ij[0], ij[1] + 1)].center if ij is not None else None
-        if city and max(abs(a - b) for a, b in zip(city, expected)) <= 16:
+        if expected and city and max(abs(a - b) for a, b in zip(city, expected)) <= 16:
+            anchor = city
+        elif city:
+            # 有城市外观就直接用它的位置（主城弹窗没有选中框时会走到这里）
             anchor = city
         else:
             # 主城外观或领地线认不出来时，用已核对的弹窗选中框校准。
+            if expected is None or not detail.center:
+                return None
             try:
                 dx, dy = measured_shift(sc.img, clean.img, 0, 0)
             except ValueError:
@@ -295,16 +378,17 @@ class RouteCamera:
             except Exception:
                 log.debug("格子资源识别失败", exc_info=True)
 
-    def tiles(self, grid):
+    def tiles(self, grid, overlays=()):
         self._classify_tiles(grid)
         result = []
         city = home_tiles(self.home)
+        blocked_regions = tuple(ATLAS_HUD) + tuple(overlays or ())
         for tile in grid.tiles.values():
             if tile.blocked:
                 continue
             if any(tile.x < right and tile.x + mv.TILE > left
                    and tile.y < bottom and tile.y + mv.TILE > top
-                   for left, top, right, bottom in ATLAS_HUD):
+                   for left, top, right, bottom in blocked_regions):
                 continue
             x, y = self.xy(tile.center)
             if min(x, y) < 0:
@@ -341,9 +425,47 @@ class RouteCamera:
         route.scan_finished()
 
     def _publish_grid(self, route, grid):
-        img = grid.img[MAP_TOP:MAP_BOTTOM]
+        """发布一帧地图。带弹窗的帧不许进拼图。
+
+        真机踩过的坑：点开主城时展开的编队信息、战斗预测、资源不足提示，
+        都会被当成干净地图截进去，网页上就出现「地图里混进游戏 UI」。
+        这里先尝试关掉弹窗重截一帧；仍然脏就整帧丢弃，让下一轮重扫，
+        绝不拿脏帧去覆盖已有地块。
+        """
+        from .ui import Screen
+
+        overlays = frame_overlays(Screen(grid.img))
+        clean = None
+        if overlays:
+            try:
+                self.expand.ui.close()
+                steady = self.expand.ui.grab_stable(timeout=1.5)
+                if not frame_overlays(steady) and self._same_view(grid.img, steady.img, overlays):
+                    clean = steady.img
+                    log.info("检测到界面弹窗，已关闭并重截地图")
+            except Exception:
+                log.debug("关弹窗后重截失败", exc_info=True)
+            if clean is None:
+                log.info("地图画面被界面挡住（弹窗），本帧丢弃，稍后重扫")
+                raise ValueError("地图画面被界面挡住，请等弹窗关闭后重试。")
+        img = (clean if clean is not None else grid.img)[MAP_TOP:MAP_BOTTOM]
         ok, jpg = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 88])
         if not ok:
             raise ValueError("地图截图生成失败，请重新读取。")
         self.recent.append((self.home, self.anchor, grid.img))
-        route.publish(self.home, self.xy(SCREEN_CENTER), self.tiles(grid), jpg.tobytes())
+        route.publish(self.home, self.xy(SCREEN_CENTER), self.tiles(grid, overlays), jpg.tobytes())
+
+    @staticmethod
+    def _same_view(before, after, overlays):
+        """关掉弹窗后镜头有没有动？动了就不能拿新图配旧坐标。"""
+        import numpy as np
+
+        if before is None or after is None or before.shape != after.shape:
+            return False
+        mask = np.ones(before.shape[:2], dtype=bool)
+        for x1, y1, x2, y2 in overlays:
+            mask[max(0, y1):max(0, y2), max(0, x1):max(0, x2)] = False
+        if not mask.any():
+            return False
+        diff = np.abs(before[mask].astype(int) - after[mask].astype(int)).mean()
+        return diff < 8.0

@@ -475,9 +475,10 @@ class Expand:
         if stop == "no_army":
             log.info("没有空闲编队了")
         if self.need_heal:
-            self.recall(thr=self.cfg.get("heal_before_retry", 0.95))
-        elif (dispatched == 0 or self.state.data.get("understrength")) and self.cfg.get("recall_hp", 0.7) > 0:
-            self.recall()
+            # 只有「打不出兵不血刃」才召回。以前这里还有一条
+            # `dispatched == 0 or understrength -> recall()`：一轮没打成、或名单里有名字
+            # 就把队伍全叫回去 —— 那正是「打一格就回城」的来源，删掉。
+            self._recall_if_needed()
         return dispatched
 
     def route_pending(self):
@@ -511,8 +512,19 @@ class Expand:
         if grid._is_water(tile):
             self.route.report(revision, f"{xy} 识别为水域，请调整路线。")
             return 0
-        if self.route.next() != step:
+        if not self.route.step_still_valid(revision):
             return 0
+        # 严格模式：你自己排的路线就是命令。历史「打不动」的冷却、自动判定
+        # 都不能让你想打的格被悄悄跳过 —— 只把情况报告给你，由你决定。
+        strict = str(self.cfg.get("route_mode", "strict")).lower() == "strict"
+        if not strict and self.state.tile_blocked(*xy, self.cfg.get("retry_hours", 3)):
+            self.route.note_skip(xy, "近期判定打不动（冷却中）", auto=True)
+            self.route.report(revision, f"{xy} 近期判定为打不动，先跳过（可在网页查看原因）。")
+            self.route.advance(revision)
+            return 0
+        rec = self.state.tile(*xy) or {}
+        if strict and rec.get("status") == "hard":
+            self.route.report(revision, f"{xy} 之前标记过打不动，但严格模式下照你的路线继续试。")
         self.bot.phase(f"正在核对地块 {xy} 的坐标和归属")
         self.dev.tap(*tile.center, jitter=0, delay=1.5)
         try:
@@ -530,6 +542,14 @@ class Expand:
                     message = f"目标是 {xy}，实际弹窗显示 {actual}。"
                 log.debug("路线地块核对失败，目标=%s，选框宽度=%s，OCR 坐标=%s，弹窗核对=%s",
                           xy, d.span, (d.x, d.y), actual)
+                # 选框括号偶尔认不出来（靠主城/被屋檐压住时实测会 span=0）。
+                # 这不该让路线原地卡死：如果弹窗自己的坐标就是对上的，而且
+                # 弹窗里有「修建 + 行军」，那就是自家的地 —— 直接记为已占领往前走。
+                if (d.span == 0 and (d.x, d.y) == xy and popup_owned(sc, xy)):
+                    log.info("%s 选框没认出来，但弹窗坐标对上且是自家领地，按已占领处理", xy)
+                    self.route.report(revision, f"{xy} 已从游戏弹窗确认占领（选框未识别），下一轮继续。",
+                                      occupied=True)
+                    return 0
                 self.route.report(revision, message + "未出兵。")
                 return 0
             if not d.attackable:
@@ -546,7 +566,9 @@ class Expand:
             record = self.state.tile(*xy) or {}
             if record.get("route_home") == list(home):
                 marching = record.get("march_until", 0) > time.time()
-                if marching or self.state.tile_blocked(*xy, self.cfg.get("retry_hours", 3)):
+                # 严格模式只等「正在行军占领」，不再因为历史判定把你选的地判成等待
+                blocked = (not strict) and self.state.tile_blocked(*xy, self.cfg.get("retry_hours", 3))
+                if marching or blocked:
                     label = record.get("label") or "等待刷新"
                     self.route.report(revision, f"{xy} {'等待占领' if marching else '等待重试'}（{label}）。")
                     return 0
@@ -562,15 +584,29 @@ class Expand:
             self.route.report(revision, f"已向 {xy} 出兵，等待占领。")
             return 1
         if result == "too_hard":
-            # 卡格诊断：连续打不动就自动绕行（否则路线会一直卡在这一格）。
-            self._diagnose_stuck(revision, home, xy, label)
+            # 打不出兵不血刃 = 兵不够/带伤。这里必须**真的**召回，不能再只写一句话
+            # （以前的 bug：too_hard 分支直接 return，下面那段 recall 是死代码，
+            #  而 _diagnose_stuck 却对玩家说「已召回补兵」）。
+            recalled = self._recall_if_needed()
+            self._diagnose_stuck(revision, home, xy, label, recalled=recalled)
             return 0
         if self.need_heal:
-            self.recall(thr=self.cfg.get("heal_before_retry", 0.95))
-        elif result == "no_army" and self.cfg.get("recall_hp", 0.7) > 0:
-            self.recall()
+            # 召回只是把在外的低血编队叫回主城补兵，不改你的路线；
+            # 但要在网页上说一句，别让你以为兵莫名其妙消失了。
+            recalled = self._recall_if_needed()
+            if recalled:
+                self.route.report(revision, f"{xy} 兵不够，已召回 "
+                                  + "、".join(n for n, _ in recalled) + " 回主城回血/补兵。")
+        elif result == "no_army":
+            # 没有可派编队 = 队伍都在外面打地/行军，或者都带伤不可派。
+            # 这时候**绝不能召回**：把刚出征的队伍叫回来，等于每打一格就回城一趟。
+            # 真正的召回理由是「打不出兵不血刃」（上面的 too_hard 分支）。
+            busy = self._busy_armies()
+            self.route.report(revision, f"{xy} 等编队空出来："
+                              + ("、".join(busy) + " 正在战斗/行军" if busy else "它们还在外面")
+                              + "，先不召回。")
         messages = {
-            "no_army": "等待空闲编队（正在召回休整）",
+            "no_army": "等待空闲编队",
             "bag_full": "背包已满，领取宝箱后重试",
             "no_points": "奖励点不足",
             "too_hard": label or "未读到兵不血刃",
@@ -580,31 +616,42 @@ class Expand:
         self.route.report(revision, f"{xy} {messages.get(result, '本轮未出兵，等待重试')}。")
         return 0
 
-    def _diagnose_stuck(self, revision, home, xy, label):
-        """一格打不动时，先判断「还能不能救」，救不了就自动绕行。
+    def _diagnose_stuck(self, revision, home, xy, label, recalled=()):
+        """一格打不动时怎么办 —— 由用户选：严格听用户，还是允许脚本绕行。
 
-        救得了的（不绕行，等下一轮）：
-          - 编队在外面 / 血量低：已经召回休整，回城变强后自然能打；
-          - 打不出兵不血刃但这类地历史上成功过：可能只是这次编队没凑齐。
-        救不了的（绕行）：
-          - 这类地连续失败达到阈值（默认 3 次），说明当前兵力确实打不过，
-            留在路线上只会一直撞，把后面的地全堵死。
+        route_mode:
+          strict    = 你选的格就是命令。打不动就停在原地、报给你，绝不改路线。
+          flexible  = 打不动时脚本可以自动绕开并重排，但会在网页上写明跳过了哪格。
+
+        recalled 是这一轮**真的**召回了哪些编队；空就别说「已召回」。
         """
-        key = self.state.learn_key(None, 1, None)  # 占位，真正的 key 由 attack_tile 记录
         rec = self.state.tile(*xy) or {}
         fails = int(rec.get("stuck", 0)) + 1
         self.state.set_tile(*xy, stuck=fails, label=label or "", route_home=list(home))
         limit = int(self.cfg.get("stuck_limit", 3))
-        if self.need_heal or fails < limit:
+        mode = str(self.cfg.get("route_mode", "strict") or "strict").lower()
+        done = ("已召回 " + "、".join(n for n, _ in recalled) + " 回主城回血/补兵。") if recalled else ""
+
+        if mode == "strict":
+            # 严格模式：只是重试，永远不动用户排的路线
+            self.route.report(revision, f"{xy} 打不出兵不血刃（第 {fails} 次）。"
+                                       + (done or "已在补兵名单里，等资源/兵力恢复再试。")
+                                       + "（严格模式：脚本不会改动你的路线）")
+            self.route.note_skip(xy, "打不出兵不血刃", auto=False)
+            return
+
+        if fails < limit:
             self.route.report(revision, f"{xy} 打不出兵不血刃（第 {fails}/{limit} 次），"
-                                       + ("先召回回血补兵再试。" if self.need_heal else "稍后重试。"))
+                                       + (done or "稍后重试。"))
             return
         # 达到阈值：标记为难打，并尝试在已扫描地图上重规划一条避开它的路线
         self.state.set_tile(*xy, status="hard", label=label or "打不过", route_home=list(home))
         log.info("%s 连续 %d 次打不出兵不血刃，标记难打", xy, fails)
         if self.route.avoid_and_replan(xy):
+            self.route.note_skip(xy, "打不过，已自动绕开", auto=True)
             self.route.report(revision, f"{xy} 打不过，已自动绕开并重排路线。")
         else:
+            self.route.note_skip(xy, "打不过，附近没有可绕行的地", auto=True)
             self.route.report(revision, f"{xy} 打不过，且没有可绕行的相邻地；"
                                        f"请调整路线或先练兵/补兵（已暂停在这一格）。")
 
@@ -727,13 +774,28 @@ class Expand:
         if not self.ui.tap_text(sc, r"^攻占$", delay=1.5) and route_home:
             return "no_panel", None
         learn_key = self.state.learn_key(d.res, d.level, d.tier)
-        # 同类地历史成功过的编队，优先出战；没有历史就按原规则挑
+        # 1) 用户选了一个开荒小队 → 只派这个小队里的编队，不再自己试
+        squad = None
         try:
-            combos = self.state.combo_get(learn_key)
-            self._combo_prefer = combos[0]["armies"] if combos else ()
+            if self.bot.operations:
+                # 小队可以绑定某条路线：只让属于这条路线的小队上场，别的路线的小队不插手
+                squad = self.bot.operations.squad_pick(
+                    route_key=getattr(self.route, "route_key", "") if route_home else None)
         except Exception:
-            self._combo_prefer = ()
-            log.debug("读取编队组合失败", exc_info=True)
+            log.debug("读取开荒小队失败", exc_info=True)
+        if squad:
+            self._combo_allow = squad.get("armies") or ()
+            self._combo_prefer = self._combo_allow
+            log.info("  使用开荒小队「%s」：%s", squad.get("name"), "、".join(self._combo_allow))
+        else:
+            # 2) 没有小队 → 用历史成功组合做优先顺位（仍然自动挑）
+            self._combo_allow = ()
+            try:
+                combos = self.state.combo_get(learn_key)
+                self._combo_prefer = combos[0]["armies"] if combos else ()
+            except Exception:
+                self._combo_prefer = ()
+                log.debug("读取编队组合失败", exc_info=True)
         result, label = self.dispatch(approve, learn_key=learn_key)
         log.info("出兵结果: %s %s", result, label or "")
         # 战绩学习：这类地（资源+等级+难度）记一次出征结果。自动策略和 route 选格都走这里，
@@ -752,7 +814,11 @@ class Expand:
             self.bot.chests.run()
         elif result not in ("no_army", "paused") and (not route_home or result == "too_hard"):
             heal_thr = self.cfg.get("heal_before_retry", 0.95)
-            if result == "too_hard" and getattr(self, "tried_min_hp", 1.0) < heal_thr:
+            # 打不出兵不血刃 = 兵力或血量不够。真正把它们排进补兵名单并请求召回，
+            # 而不是只在网页上写一句「已召回补兵」（以前就是只写不做的）。
+            if result == "too_hard" and self._need_supply(getattr(self, "tried_armies", ())):
+                log.info("  兵力不足：已把参与的编队排进补兵名单，回城后自动补")
+            elif result == "too_hard" and getattr(self, "tried_min_hp", 1.0) < heal_thr:
                 log.info("  编队带伤（最低血量 %.0f%%），回城回血后再试", self.tried_min_hp * 100)
                 self.need_heal = True
                 self.state.set_tile(d.x, d.y, name=d.name, status="attacking", label=label, **fields)
@@ -763,6 +829,91 @@ class Expand:
                                 d.name, d.x, d.y, label)
         return result, label
 
+    BUSY_WORDS = r"战斗|行军|攻占|攻打|返回|治疗|休整"
+
+    def _busy_armies(self):
+        """正在战斗/行军/治疗中的编队名 —— 这些召不回来，别去空跑一趟。
+
+        依据是军队面板最近一次读到的状态（bot.army_snapshot），读不到就返回空，
+        让调用方按原逻辑走（宁可不判，也不能凭空拦住召回）。
+        """
+        try:
+            cache = getattr(self.bot, "_armies_cache", None) or {}
+        except Exception:
+            return []
+        out = []
+        for name, info in cache.items():
+            st = (info or {}).get("state") or ""
+            if re.search(self.BUSY_WORDS, st):
+                out.append(name)
+        return out
+
+    def _recall_if_needed(self, force=False):
+        """真正执行召回。返回 [(名字, 行军秒数)]，空列表表示没有可召回的编队。
+
+        以前这里没有单独的方法：`_need_supply` 只设了 need_heal 和一个假的冷却，
+        真正调 recall() 的那段又是死代码，所以玩家看到「已召回补兵」但队伍根本没动。
+        """
+        thr = self.cfg.get("heal_before_retry", 0.95) if self.need_heal else self.cfg.get("recall_hp", 0.7)
+        gap = float(self.cfg.get("recall_cooldown_seconds", 600))
+        now = time.time()
+        last = float(self.state.data.get("recall_at") or 0)
+        if not force and now - last < gap:
+            log.info("  距上次召回不到 %d 分钟，这次先不重复召回（补兵名单已记下）", gap // 60)
+            self.need_heal = False
+            return []
+        try:
+            recalled = self.recall(thr=thr)
+        except Exception as exc:
+            log.warning("  召回失败：%s", exc)
+            recalled = []
+        self.need_heal = False
+        if recalled:
+            # 冷却只在实际召回之后才记，否则会出现「从没召回却一直在冷却」的死循环
+            self.state.data["recall_at"] = now
+            self.state.save()
+            log.info("  已召回 %d 支：%s（回主城回血/补兵）", len(recalled),
+                     "、".join(n for n, _ in recalled))
+        else:
+            log.info("  没有可召回的编队（在外的队伍可能已经在回城路上，或都不在城外）")
+        return recalled
+
+    def _need_supply(self, names):
+        """打不出兵不血刃：**只**表示这一轮该召回，不往补兵名单里塞名字。
+
+        以前这里会 mark_understrength()，于是招兵任务（recruit.py 看到在外的
+        缺员编队会 recall）把刚出征的队伍拽回主城 —— 表现就是「打一格就回城」。
+        补兵名单只该由招兵任务按「真的缺员」自己判断，不能由「一格打不动」写。
+        """
+        names = [n for n in (names or []) if n]
+        if not names:
+            return False
+        self.need_heal = True
+        log.info("  %s 这一轮打不出兵不血刃，准备召回它们回血（不改你的路线）",
+                 "、".join(names))
+        return True
+
+    def mark_understrength(self, names):
+        """把需要补兵的编队记进 state：招兵任务据此在它们回城后补满。"""
+        weak = [n for n in (self.state.data.get("understrength") or []) if n]
+        changed = False
+        for name in names or []:
+            name = name.strip() if isinstance(name, str) else ""
+            if name and name not in weak:
+                weak.append(name)
+                changed = True
+        if changed:
+            self.state.data["understrength"] = weak
+            self.state.save()
+
+    @staticmethod
+    def recall_accepted(sc):
+        """召回点了确定之后，游戏会把编队改成「行军中/返回中」。读到了才算受理。"""
+        try:
+            return bool(sc.text(r"行军中|返回中|撤退中"))
+        except Exception:
+            return False
+
     def recall(self, names=None, thr=None):
         """把在外面的空闲编队调回主城：血量低的回血、缺员的回城补兵。
 
@@ -771,15 +922,22 @@ class Expand:
         thr = self.cfg.get("recall_hp", 0.7) if thr is None else thr
         grid = self.center_city()
         if grid is None:
+            log.warning("召回失败：找不到主城，无法打开行军面板")
             return []
-        t = grid.tiles[grid.find_city()]
+        try:
+            t = grid.tiles[grid.find_city()]
+        except Exception:
+            log.warning("召回失败：主城所在的格子识别不到")
+            return []
         self.dev.tap(int(t.x + mv.TILE), int(t.y + mv.TILE), delay=1.3)
         sc = self.ui.grab()
         if not self.ui.tap_text(sc, r"^行军$", delay=1.5):
+            log.warning("召回失败：点开主城后没有「行军」按钮（弹窗可能没出来）")
             self.ui.to_map()
             return []
         sc = self.ui.wait_text(r"选择要前往的军队", timeout=4)
         if sc is None:
+            log.warning("召回失败：没等到「选择要前往的军队」面板")
             self.ui.to_map()
             return []
         weak = set(self.state.data.get("understrength", []))
@@ -791,8 +949,10 @@ class Expand:
             for a in armies:
                 seen.add(a[1])
                 tap_y, name, secs, loc, hp = a
-                if not loc or "主城" in loc:
-                    continue
+                if "主城" in (loc or ""):
+                    continue          # 已经在主城，不用召
+                if not loc and names is None:
+                    continue          # 位置没读清、又不是点名召回：不乱动
                 if names is not None:
                     want, why = name in names, "按指定召回"
                 elif name in weak:
@@ -801,13 +961,36 @@ class Expand:
                     want, why = hp is not None and hp < thr, "回主城休整"
                 if not want:
                     continue
+                before = self.read_selected(sc)
                 self.dev.tap(400, tap_y, delay=0.6)
+                sc = self.ui.grab()
+                after = self.read_selected(sc)
+                # 核对「真的选中了这一支」：卡片位置偶尔会差半张，
+                # 不核对就会点到旁边那支（真机踩过：主城待机的编队被一起召回）。
+                if before and after and after[0] <= before[0]:
+                    log.info("  召回 %s：这一下没选中（卡片位置偏了），跳过", name)
+                    continue
                 picked.append((name, secs))
-                log.info("召回 %s（位于%s，血量%s，行军%ss）%s", name, loc,
+                log.info("召回 %s（位于%s，血量%s，行军%ss）%s", name, loc or "?",
                          "%.0f%%" % (hp * 100) if hp is not None else "?", secs, why)
             sc = self.scroll_armies()
-        if picked:
-            self.ui.tap_text(self.ui.grab(), r"^确定$", (200, 1000, 520, 1100), delay=1.5)
+        if not picked:
+            log.info("召回：这一轮没有需要召回的编队（点名 %s）",
+                     "、".join(names) if names else "按血量/缺员自动判断")
+            self.ui.to_map()
+            return []
+        accepted = False
+        names_out = [n for n, _ in picked]
+        self.ui.tap_text(self.ui.grab(), r"^确定$", (200, 1000, 520, 1100), delay=1.5)
+        after = self.ui.grab_stable(timeout=2.5)
+        # 受理的判据：面板已经关掉（回到大地图），或者能看到「行军中/返回中」。
+        # 以前只找「行军中」四个字，而游戏点完确定会立刻关面板，于是永远报「没读到回执」，
+        # 明明召回成功了却像失败一样。
+        accepted = self.recall_accepted(after) or self.ui.on_map(after)
+        if accepted:
+            log.info("召回已受理，%s 正在回主城回血", "、".join(names_out))
+        else:
+            log.warning("召回没读到回执：%s（下一轮会按军队面板核对位置）", "、".join(names_out))
         self.ui.to_map()
         return picked
 
@@ -999,7 +1182,8 @@ class Expand:
     def dispatch(self, approve=None, learn_key=None):
         """在“选择要出战的军队”界面挑兵。返回 (结果, 预测标签)。
 
-        learn_key 给定时，把最终选中的编队组合记进编队组合学习（同类地下次优先复用）。
+        如果用户选了开荒小队（operations.squad_pick 命中），就只派小队里的编队，
+        不再自己挨个试。learn_key 给定时，把最终选中的编队组合记进战斗学习。
         """
         self.bot.phase("正在检查可出战编队和战斗预测")
         # 硬规则（用户要求）：只有预测“兵不血刃”才出兵；会死人的进攻一律留给玩家亲自判断，配置改不了
@@ -1007,6 +1191,14 @@ class Expand:
         sc = self.ui.wait_text(r"选择要出战的军队", timeout=5)
         if sc is None:
             return "no_panel", None
+        # 用户预设的编队：只允许点这几支
+        allowed = set(getattr(self, "_combo_allow", ()) or ())
+        if allowed:
+            log.info("  按预设编队出兵：%s", "、".join(sorted(allowed)))
+        if allowed:
+            # 用户编好了小队：整队一次性同时指派，绝不把同一小队拆到不同地块。
+            # 以前是逐支勾、第一支预测「兵不血刃」就 break，剩下的成员被下一格顺手派走。
+            return self._dispatch_whole_squad(sc, allowed, approve, learn_key)
         label = None
         selected = 0
         seen = set()
@@ -1034,6 +1226,9 @@ class Expand:
                                        -(round((a[4] if a[4] is not None else 1.0) * 5)), a[2]))
             for tap_y, name, secs, loc, hp in armies:
                 seen.add(name)
+                if allowed and name not in allowed:
+                    log.debug("  - %s 不在预设组合里，跳过", name)
+                    continue
                 if secs > self.cfg.get("max_march_seconds", 1800):
                     continue
                 if hp is not None and hp < min_hp:
@@ -1068,10 +1263,60 @@ class Expand:
             if done:
                 break
             sc = self.scroll_armies()
-        if selected == 0:
+        self.tried_armies = picked
+        return self._commit_dispatch(sc, label, picked, approve, learn_key)
+
+    def _dispatch_whole_squad(self, sc, allowed, approve, learn_key):
+        """把小队成员一次性全部勾上，再统一读一次预测。
+
+        安全线和其他路径完全一样：最终预测不是「兵不血刃」就不出兵。
+        区别只在勾选方式 —— 同一小队的编队一起走，不拆开。
+        """
+        self.bot.phase("正在同时指派开荒小队")
+        picked = []
+        self.tried_min_hp = 1.0
+        self.march_seconds = 0
+        full = False
+        max_march = self.cfg.get("max_march_seconds", 1800)
+        for _page in range(3):
+            for tap_y, name, secs, loc, hp in sorted(self.list_armies(sc), key=lambda a: a[2]):
+                if name not in allowed or name in picked:
+                    continue
+                if secs > max_march:
+                    log.info("  - %s 行军 %ss 太远，不并入小队", name, secs)
+                    continue
+                before = self.read_selected(sc)
+                self.dev.tap(400, tap_y)
+                time.sleep(0.5)
+                sc = self.ui.grab()
+                after = self.read_selected(sc)
+                if before and after and after[0] <= before[0]:
+                    log.debug("  %s 无法选择（忙碌中?）", name)
+                    continue
+                picked.append(name)
+                self.march_seconds = max(self.march_seconds, secs)
+                if hp is not None:
+                    self.tried_min_hp = min(self.tried_min_hp, hp)
+                log.info("  + %s (行军%ss, 血量%s) 已并入小队", name, secs,
+                         "%.0f%%" % (hp * 100) if hp is not None else "?")
+                if after and after[0] >= after[1]:
+                    full = True      # 出征位已满，再加不进去了
+                    break
+            if full or set(allowed) <= set(picked):
+                break
+            sc = self.scroll_armies()
+        label = self.read_forecast(self.ui.grab())
+        if picked:
+            log.info("  小队同时指派：%s → 预测: %s", "、".join(picked), label or "未读到")
+        self.tried_armies = picked
+        return self._commit_dispatch(sc, label, picked, approve, learn_key)
+
+    def _commit_dispatch(self, sc, label, picked, approve, learn_key):
+        """选中编队之后的统一收尾：复核预测 → 确认出兵 → 处理拦截提示。"""
+        if not picked:
             self.ui.close()
             return "no_army", None
-        if label not in accept:
+        if label not in [SAFE_LABEL]:
             self.ui.close()
             if learn_key:
                 # 这套组合没打出兵不血刃，记一笔失败（下次不优先复用）
@@ -1086,6 +1331,7 @@ class Expand:
             log.warning("  出兵前复核预测为 %s，取消出兵", final)
             self.ui.close()
             return "too_hard", final
+
         def confirm():
             return self.ui.tap_text(sc, r"^确定$", (200, 1000, 520, 1100), delay=1.5)
 

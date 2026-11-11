@@ -8,6 +8,7 @@
   - 新手引导对话框在底部 (y≈1060~1200)，点一下继续。
 """
 import logging
+import re
 import time
 
 import cv2
@@ -147,6 +148,18 @@ class UI:
         """地图上是否开着地块弹窗（有选中框）。"""
         return self.brackets(sc) is not None
 
+    def has_home_popup(self, sc):
+        """主城弹窗：没有选中框，但会显示坐标 + 进入/行军，展开后还带编队列表。
+
+        以前只认“选中框”，主城弹窗被当成干净地图，读地图时把整块弹窗也截进去。
+        """
+        if not (sc.text(r"^进入$") and sc.text(r"^行军$")):
+            return False
+        for b in sc.boxes:
+            if re.fullmatch(r"\(\s*\d+\s*[,，]\s*\d+\s*\)", b.text.replace(" ", "")):
+                return True
+        return False
+
     def is_dialogue(self, sc):
         """新手引导/剧情对话框（底部白框）。"""
         x1, y1, x2, y2 = R_DIALOG
@@ -158,7 +171,7 @@ class UI:
     def classify(self, sc):
         # 快速路径：左下角按钮没被遮罩压暗 = 没有面板/对话框挡着，不用 OCR
         if self.on_map(sc):
-            return "map_popup" if self.has_tile_popup(sc) else "map"
+            return "map_popup" if (self.has_tile_popup(sc) or self.has_home_popup(sc)) else "map"
         if self.in_city(sc):
             return "city"
         if sc.has("city_btn_back", R_BOTTOM_LEFT, 0.8) is not None:
@@ -171,7 +184,7 @@ class UI:
         if self.in_city(sc):
             return "city"
         if self.on_map(sc):
-            return "map_popup" if self.has_tile_popup(sc) else "map"
+            return "map_popup" if (self.has_tile_popup(sc) or self.has_home_popup(sc)) else "map"
         return "unknown"
 
     # ---------- 关闭弹窗 ----------

@@ -84,6 +84,44 @@ class Build:
     def positions(self):
         return self.bot.state.data.setdefault("building_pos", {})
 
+    # ---------- 建筑等级缓存：只首次读数，后面升级时再核对 ----------
+    CACHE_KEY = "building_cache"
+
+    def load_cache(self):
+        """把上次读到的建筑等级填回网页，返回 True = 不用再一座座点。"""
+        ops = self.bot.operations
+        if not ops or not ops.home:
+            return False
+        cache = self.bot.state.data.get(self.CACHE_KEY) or {}
+        if cache.get("home") != list(ops.home):
+            return False
+        buildings = cache.get("buildings") or {}
+        if not buildings:
+            return False
+        ops.observe(buildings={name: dict(info) for name, info in buildings.items()},
+                    buildingsCachedAt=cache.get("at", 0),
+                    construction=cache.get("construction"))
+        log.info("沿用上次建筑等级（%s，%d 座），升级时再核对",
+                 time.strftime("%m-%d %H:%M", time.localtime(cache.get("at", 0))),
+                 len(buildings))
+        return True
+
+    def remember_buildings(self):
+        """把当前 facts 里的建筑等级存进 state，下次启动直接复用。"""
+        ops = self.bot.operations
+        if not ops or not ops.home:
+            return
+        buildings = ops.facts.get("buildings") or {}
+        if not buildings:
+            return
+        self.bot.state.data[self.CACHE_KEY] = {
+            "home": list(ops.home),
+            "at": time.time(),
+            "buildings": {name: dict(info) for name, info in buildings.items()},
+            "construction": ops.facts.get("construction"),
+        }
+        self.bot.state.save()
+
     # ---------- 面板解析 ----------
     def read_panel(self, sc):
         info = {"name": None, "level": None, "can_upgrade": False, "busy": False}
@@ -165,6 +203,11 @@ class Build:
             return False  # 面板还在 = 没升成
         log.info("开始升级 %s → %s 级", info["name"], (info["level"] or 0) + 1)
         self.bot.state.inc("upgrades")
+        if self.bot.operations:
+            # 升级命令本身就是一次核对：只更新这一座，不用回头全城再点一遍
+            self.bot.operations.building({"name": info["name"],
+                                          "level": (info["level"] or 0) + 1, "busy": True})
+            self.remember_buildings()
         return True
 
     # ---------- 扫描 ----------
@@ -192,6 +235,7 @@ class Build:
                 self.bot.phase("正在返回城内继续扫描建筑", "refresh")
                 self.ui.to_city()
         self.bot.state.save()
+        self.remember_buildings()
 
     def queued_upgrade(self, job):
         ops = self.bot.operations

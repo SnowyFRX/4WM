@@ -20,6 +20,9 @@ def has_chests(img):
 
 
 class Chests:
+    MAX_PAGES = 8          # 编队上限 9 支，一屏 4 张，8 屏足够覆盖且有上限保护
+    RETRY_EMPTY = 180      # 角标在但找不到可领入口时，隔 3 分钟再看（别每个周期都空转）
+
     def __init__(self, bot):
         self.bot = bot
         self.dev = bot.dev
@@ -48,24 +51,49 @@ class Chests:
         return sc
 
     def run(self):
-        """返回领取的宝箱个数。"""
-        sc = self.open_army_panel()
-        claimed = 0
-        for _ in range(20):
-            b = sc.text(r"获得宝箱\s*[xX×]\s*\d+")
-            if not b:
-                break
-            self.dev.tap(*b.center, delay=1.0)
-            n, stop = self._drain()
-            claimed += n
-            if stop:
-                break
-            sc = self.ui.grab()
-            if not sc.text(r"所有军队|拥有军队"):
-                sc = self.open_army_panel()
-        log.info("领取宝箱 %d 个", claimed)
+        """返回领取的宝箱个数。
+
+        军队面板一屏只放 4 张卡，第 5 支往下的宝箱要往下翻才看得到。
+        以前只看当前屏，所以经常「明明有角标却领取 0 个」。
+        """
+        from ..scroll import walk
+
+        box = {"sc": self.open_army_panel(), "claimed": 0, "stop": False}
+
+        def page(screen):
+            box["sc"] = screen
+            for _ in range(20):
+                b = screen.text(r"获得宝箱\s*[xX×]\s*\d+")
+                if not b:
+                    return True          # 这一屏领完了，交给 walk 翻下一页
+                self.dev.tap(*b.center, delay=1.0)
+                n, stop = self._drain()
+                box["claimed"] += n
+                if stop:
+                    box["stop"] = True
+                    return False     # 库房满了，别再翻
+                screen = self.ui.grab()
+                box["sc"] = screen
+                if not screen.text(r"所有军队|拥有军队"):
+                    screen = self.open_army_panel()
+                    box["sc"] = screen
+            return not box["stop"]
+
+        pages = walk(lambda: box["sc"],
+                     lambda: self.dev.swipe(370, 900, 370, 724, 420, delay=0.7),
+                     page, max_pages=self.MAX_PAGES)
+        claimed = box["claimed"]
+        log.info("领取宝箱 %d 个（看了 %d 屏）", claimed, pages)
         if claimed:
             self.bot.state.inc("chests", claimed)
+        else:
+            # 真机实测（2026-11-11 20:07）：军队按钮右上角明明有金色宝箱角标，
+            # 但「所有军队」5 张卡翻到底、连「战报」页签也翻过，都没有「获得宝箱」入口。
+            # 以前这里什么都不记，于是每个任务周期都开一次面板、空转一轮、刷一条日志。
+            # 现在如实上报并短期退避，等游戏把入口放出来再看。
+            self.blocked_until = time.time() + self.RETRY_EMPTY
+            log.warning("宝箱角标亮着，但军队面板/战报里都没有可领入口；%d 分钟后再看",
+                        self.RETRY_EMPTY // 60)
         self.ui.to_map()
         return claimed
 

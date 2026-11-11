@@ -1,5 +1,6 @@
 """网页上的脚本指令队列，与游戏内的施工和招募队列分别记录。"""
 import json
+import logging
 import secrets
 import threading
 import time
@@ -7,13 +8,25 @@ from pathlib import Path
 
 from .vision import ROOT
 
+log = logging.getLogger(__name__)
+
 MAX_JOBS = 1000
+
+# 用户自定义开荒小队：只记录「小队名 + 哪几支编队」。
+# 不再按资源类型/等级/难度做规则匹配 —— 用户选哪几支，开荒就只派哪几支。
+# 结构：{"squads": [{"name": "一队", "armies": ["编队2", "编队4"], "on": true}],
+#        "active": "一队"}
 
 
 class Operations:
     def __init__(self, path=Path(ROOT, "data", "operation_queues.json")):
         self.lock = threading.Lock()
         self.path = Path(path)
+        # 编队组合预设单独存，跟队列分开，方便单独备份/交接
+        self.squad_path = Path(ROOT, "data", "army_combos.json")
+        self.squads = []          # [{name, armies:[...], on:bool}]
+        self.active_squad = None  # 这次开荒用哪个小队；None = 不启用预设
+        self._load_squads()
         self.home = None
         self.queues = {"build": [], "recruit": [], "drill": []}
         self.messages = {"build": "", "recruit": "", "drill": ""}
@@ -23,6 +36,109 @@ class Operations:
         self.next_refresh = 0
         self.refreshing = False
         self.refresh_error = ""
+
+    # ---------- 用户自定义开荒小队 ----------
+    def _load_squads(self):
+        try:
+            data = json.loads(self.squad_path.read_text(encoding="utf-8"))
+            items = data.get("squads") if isinstance(data, dict) else data
+            if not isinstance(items, list) and isinstance(data, dict):
+                items = data.get("combos") or []   # 兼容旧文件，但丢掉旧的 match 规则
+            if not isinstance(items, list):
+                items = []
+            self.squads = [{"name": str(c.get("name") or "小队%d" % (i + 1))[:20],
+                            "armies": [str(a) for a in c.get("armies") or [] if str(a).strip()][:9],
+                            "on": bool(c.get("on", True)),
+                            "route": str(c.get("route") or "")[:64]}
+                           for i, c in enumerate(items)
+                           if isinstance(c, dict) and c.get("armies")]
+            active = data.get("active") if isinstance(data, dict) else None
+            self.active_squad = active if any(s["name"] == active for s in self.squads) else None
+        except (OSError, ValueError):
+            self.squads = []
+            self.active_squad = None
+
+    def _save_squads(self):
+        try:
+            self.squad_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self.squad_path.with_suffix(".tmp")
+            tmp.write_text(json.dumps({"squads": self.squads, "active": self.active_squad},
+                                      ensure_ascii=False, indent=2), encoding="utf-8")
+            tmp.replace(self.squad_path)
+        except OSError:
+            log.warning("保存开荒小队失败", exc_info=True)
+
+    def squad_snapshot(self):
+        with self.lock:
+            return [dict(s) for s in self.squads]
+
+    def squad_set(self, squads, active=None):
+        """整表覆盖。小队只存名字、成员，以及可选的路线绑定；不存任何地块匹配规则。"""
+        if not isinstance(squads, list):
+            raise ValueError("小队数据格式不对。")
+        clean = []
+        for c in squads[:50]:
+            if not isinstance(c, dict):
+                continue
+            armies = c.get("armies")
+            if not isinstance(armies, list) or not armies:
+                continue
+            armies = [str(a) for a in armies if str(a).strip()][:9]
+            if not armies:
+                continue
+            name = str(c.get("name") or "").strip()[:20] or "小队%d" % (len(clean) + 1)
+            while any(s["name"] == name for s in clean):
+                name = (name + "2")[:20]
+            clean.append({"name": name, "armies": armies, "on": bool(c.get("on", True)),
+                          "route": str(c.get("route") or "")[:64]})
+        with self.lock:
+            self.squads = clean
+            names = [s["name"] for s in clean]
+            self.active_squad = active if active in names else (names[0] if names else None)
+            self._save_squads()
+            self.changed.add("expand")
+        return clean
+
+    def set_active_squad(self, name):
+        """选择这次开荒用哪个小队；None/空 = 不启用预设，脚本自动挑。"""
+        with self.lock:
+            if name in (None, "", "auto"):
+                self.active_squad = None
+            elif any(s["name"] == name for s in self.squads):
+                self.active_squad = name
+            else:
+                raise ValueError("没有这个小队。")
+            self._save_squads()
+            self.changed.add("expand")
+            return self.active_squad
+
+    def squad_pick(self, route_key=None):
+        """挑这次开荒用哪个小队。
+
+        - 用户选了某个小队，就按用户选的；
+        - 该小队绑定了某条路线（route_key），只在打那条路线时生效；
+        - 没有绑定路线的小队当作通用小队，任何路线都能用；
+        - 没有可用小队返回 None（脚本才回到自动挑兵）。
+        """
+        with self.lock:
+            usable = [s for s in self.squads if s.get("on", True)]
+            if not usable:
+                return None
+            ordered = ([s for s in usable if s["name"] == self.active_squad]
+                       + [s for s in usable if s["name"] != self.active_squad])
+            for s in ordered:
+                bound = s.get("route") or ""
+                if bound and route_key and bound != route_key:
+                    continue   # 这条小队属于别的路线，别插手
+                if bound and not route_key:
+                    continue   # 绑了路线但当前不知道是哪条，谨慎起见不抢
+                return dict(s)
+            return None
+
+    def squad_routes(self):
+        """小队 -> 它绑定的路线（给网页显示用）。"""
+        with self.lock:
+            return {s["name"]: s.get("route") or "" for s in self.squads}
 
     def identify(self, home):
         with self.lock:
@@ -57,6 +173,7 @@ class Operations:
         with self.lock:
             return dict(queues={k: [dict(j) for j in q] for k, q in self.queues.items()},
                         messages=dict(self.messages), facts=dict(self.facts),
+                        squads=[dict(s) for s in self.squads], activeSquad=self.active_squad,
                         blocked={k: max(0, int(v - time.monotonic())) for k, v in self.blocked.items()},
                         refreshing=self.refreshing, refreshError=self.refresh_error, buildingNames=BUILDING_NAMES)
 
@@ -64,6 +181,13 @@ class Operations:
         from .tasks.build import BUILDING_NAMES
 
         op, kind = data.get("op"), data.get("kind")
+        # 小队设置要在取锁之前处理：squad_set 自己会加同一把锁
+        if op == "save_squads":
+            self.squad_set(data.get("squads") or [], data.get("active"))
+            return
+        if op == "set_squad":
+            self.set_active_squad(data.get("name"))
+            return
         with self.lock:
             if op == "refresh":
                 if not self.refreshing:
@@ -89,7 +213,11 @@ class Operations:
                     if not isinstance(army, str) or army not in self.facts.get("armies", {}):
                         raise ValueError("请选择已读取的编队。")
                     count = max(1, min(count, 9))
-                    queue.append(dict(id=secrets.token_hex(8), army=army, count=count))
+                    slot = data.get("slot", 0)
+                    if slot not in (0, 1, 2, 3, 4, 5):
+                        raise ValueError("兵种格只能是 1–5。")
+                    queue.append(dict(id=secrets.token_hex(8), army=army, count=count,
+                                      slot=int(slot)))
                 else:
                     army, slot = data.get("army"), data.get("slot")
                     if (not isinstance(army, str) or army not in self.facts.get("armies", {})
