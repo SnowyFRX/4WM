@@ -3,171 +3,497 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- 这个页面是 inline CSS/JS，改动全在 HTML 里，所以最怕浏览器拿旧副本。
+     双保险：服务端有 no-store，这里再声明一次，避免改了样式却看到旧样子。 -->
+<meta http-equiv="Cache-Control" content="no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
 <title>九万亩 · 开荒地图</title>
+<meta name="description" content="九万亩脚本的运行台：读取游戏地图、规划并执行开荒路线，查看资源、编队与建造/招募/练兵队列。">
 <style>
+  /* ============================================================
+     九万亩控制台 · 设计系统（单一样式源）
+     规则来源：taste-skill 的 system.md
+       · 间距只用 4 / 8 / 12 / 16 / 24 / 32 / 48 刻度
+       · 圆角只有 8 / 12 / 16 / 999 四档
+       · 字号下限 13px，正文 14px，标题 17 / 26px
+       · 界面 90% 以上中性；强调色只有一个（--accent）
+       · 语义色只表达状态，不做装饰
+       · 卡片一种配方，按钮一种形态，分隔线统一用 hairline
+     改颜色/间距只动 :root，不要在下面写新的裸数值。
+     ============================================================ */
   :root {
     color-scheme: dark;
-    /* 沿用旧版控制台的配色规范：深蓝灰底、1px 极淡描边代替阴影、主色只出现在关键动作上 */
-    --bg: #0E1015; --surface: #161A22; --surface-2: #1B2029; --surface-3: #222834;
-    --stroke: #242A36; --stroke-hi: #303849;
-    --ink: #E9EDF5; --ink-2: #98A2B3; --ink-3: #5C6675;
-    --primary: #4C8DFF; --green: #3DDC97; --amber: #F2B45A; --red: #F16A76;
-    --purple: #A78BFA; --cyan: #57D3E8;
-    /* 兼容旧变量名 */
-    --panel: var(--surface); --edge: var(--stroke); --quiet: var(--ink-2); --gold: var(--amber);
+
+    /* 面：从背景到控件，四层就够 */
+    --bg:        #0B0D12;
+    --surface-1: #121620;
+    --surface-2: #171C27;
+    --surface-3: #1F2532;
+
+    /* 分隔线：一条 12% 白，一条加强 20% */
+    --line:        #FFFFFF13;
+    --line-strong: #FFFFFF21;
+
+    /* 文字：正文 7:1 以上，次要 4.5:1 以上 */
+    --ink:   #E8ECF4;
+    --ink-2: #A6B0C1;
+    --ink-3: #7C8694;
+
+    /* 一个强调色 */
+    --accent:      #5B8DEF;
+    --accent-hi:   #7BA6F7;
+    --accent-soft: #5B8DEF1F;
+
+    /* 状态色，只用于状态 */
+    --ok:   #3FCF8E;
+    --warn: #E8B45C;
+    --bad:  #EF6B76;
+    --ok-soft:   #3FCF8E1F;
+    --warn-soft: #E8B45C1F;
+    --bad-soft:  #EF6B761F;
+
+    /* 间距刻度 */
+    --s-1: 4px;  --s-2: 8px;  --s-3: 12px; --s-4: 16px;
+    --s-5: 24px; --s-6: 32px; --s-7: 48px;
+
+    /* 圆角四档 */
+    --r-sm: 8px; --r-md: 12px; --r-lg: 16px; --r-full: 999px;
+
+    /* 字号 */
+    --t-label: 13px;
+    --t-small: 13px;
+    --t-body:  14px;
+    --t-card:  15px;
+    --t-h2:    17px;
+    --t-h1:    26px;
+    --t-stat:  20px;
+
+    /* 动效 */
+    --ease: cubic-bezier(.22, .61, .36, 1);
+    --fast: 130ms;
+    --base: 190ms;
   }
+
   * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--ink);
-    font: 14px/1.55 "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", sans-serif;
-    -webkit-font-smoothing: antialiased; }
-  main { max-width: min(96vw, 1560px); margin: auto; padding: 24px 26px 44px; }
-  h1 { margin: 0; font-size: 24px; font-weight: 600; letter-spacing: .3px; }
-  h2 { margin: 0 0 10px; font-size: 14px; font-weight: 600; color: var(--ink); }
-  p { margin: 0; }
-  header { display: flex; justify-content: space-between; align-items: baseline; gap: 14px;
-    padding-bottom: 16px; margin-bottom: 16px; border-bottom: 1px solid var(--stroke); }
-  #location, .muted { color: var(--ink-2); font-size: 12.5px; }
-  .runtime { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 14px;
-    padding: 12px 16px; margin-bottom: 16px; }
-  .runtime-label { display: inline-flex; align-items: center; gap: 7px; font-weight: 600; color: var(--ink-2); font-size: 12.5px; }
-  .runtime-label::before { content: ""; width: 8px; height: 8px; background: currentColor; border-radius: 50%; box-shadow: 0 0 8px currentColor; }
-  .runtime[data-mode=running] .runtime-label, .runtime[data-mode=done] .runtime-label { color: var(--green); }
-  .runtime[data-mode=waiting] .runtime-label { color: var(--amber); }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: var(--t-body)/1.6 "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  main { max-width: min(96vw, 1560px); margin: auto; padding: var(--s-5) var(--s-5) var(--s-7); }
+
+  h1 { margin: 0; font-size: var(--t-h1); font-weight: 600; letter-spacing: -.2px; line-height: 1.2; }
+  h2 { margin: 0 0 var(--s-3); font-size: var(--t-h2); font-weight: 600; letter-spacing: -.1px; }
+  p  { margin: 0; }
+  a  { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+  a:hover { color: var(--accent-hi); }
+
+  /* 焦点环：一处定义，全站一致 */
+  :where(button, a, select, input, summary, [tabindex]):focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    border-radius: var(--r-sm);
+  }
+
+  /* ---------- 页头 ---------- */
+  header {
+    display: flex; justify-content: space-between; align-items: baseline; gap: var(--s-4);
+    padding-bottom: var(--s-4); margin-bottom: var(--s-5);
+    border-bottom: 1px solid var(--line);
+  }
+  #location { color: var(--ink-2); font-size: var(--t-small); font-variant-numeric: tabular-nums; }
+  .muted { color: var(--ink-2); font-size: var(--t-small); }
+
+  /* ---------- 运行状态条 ---------- */
+  .runtime {
+    display: flex; align-items: center; flex-wrap: wrap; gap: var(--s-2) var(--s-4);
+    padding: var(--s-3) var(--s-4); margin-bottom: var(--s-5);
+  }
+  .runtime-label {
+    display: inline-flex; align-items: center; gap: var(--s-2);
+    font-weight: 600; color: var(--ink-2); font-size: var(--t-small);
+  }
+  .runtime-label::before {
+    content: ""; width: 8px; height: 8px; border-radius: var(--r-full);
+    background: currentColor;
+  }
+  .runtime[data-mode=running] .runtime-label,
+  .runtime[data-mode=done] .runtime-label { color: var(--ok); }
+  .runtime[data-mode=waiting] .runtime-label { color: var(--warn); }
   .runtime[data-mode=idle] .runtime-label { color: var(--ink-3); }
-  .runtime[data-mode=error] .runtime-label { color: var(--red); }
-  #runtimeDetail { flex: 1 1 240px; overflow-wrap: anywhere; font-size: 13.5px; }
-  #runtimeRecent { flex-basis: 100%; color: var(--ink-3); font-size: 12.5px; }
-  .layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(320px, 380px);
-    gap: 16px; align-items: start; }
-  .panel { background: var(--surface); border: 1px solid var(--stroke); border-radius: 14px; overflow: hidden; }
-  .controls, .legend, .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-  .controls, .legend { padding: 11px 14px; }
-  .legend { justify-content: space-between; color: var(--ink-2); font-size: 12.5px; border-top: 1px solid var(--stroke); }
-  .key { display: inline-block; margin-right: 5px; width: 9px; height: 9px; border-radius: 2px; border: 1px solid currentColor; }
-  .key.owned { background: #3DDC9733; color: var(--green); }
-  .key.route { background: #F2B45A44; color: var(--amber); }
-  .key.water { background: #57D3E833; color: var(--cyan); }
-  /* 按钮：默认低调，主色只给关键动作 */
-  button { background: var(--surface-3); color: var(--ink); border: 1px solid var(--stroke);
-    border-radius: 9px; padding: 7px 14px; font: inherit; font-size: 13px; cursor: pointer;
-    transition: background .15s, border-color .15s, color .15s; }
-  button:hover:not(:disabled) { background: #2A3242; border-color: var(--stroke-hi); }
-  button:active:not(:disabled) { background: #202634; }
-  button:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
-  button:disabled { color: var(--ink-3); background: var(--surface-2); border-color: var(--stroke); cursor: default; }
-  button.primary { background: var(--green); border-color: transparent; color: #07130D; font-weight: 600; }
-  button.primary:hover:not(:disabled) { background: #4FE7A6; }
-  button.primary:disabled { background: #1D2A25; color: #456053; }
-  .viewport { display: grid; place-items: center; background: #0B0D11; min-height: 300px; }
+  .runtime[data-mode=error] .runtime-label { color: var(--bad); }
+  #runtimeDetail { flex: 1 1 240px; overflow-wrap: anywhere; font-size: var(--t-body); }
+  #runtimeRecent { flex-basis: 100%; color: var(--ink-3); font-size: var(--t-small); }
+
+  /* ---------- 布局 ---------- */
+  .layout {
+    display: grid; grid-template-columns: minmax(0, 1fr) minmax(320px, 380px);
+    gap: var(--s-4); align-items: start;
+  }
+
+  /* 卡片：一种配方 —— surface-2 底 + hairline + 16 圆角；hover 抬 2px */
+  .panel {
+    background: var(--surface-1);
+    border: 1px solid var(--line);
+    border-radius: var(--r-lg);
+    overflow: hidden;
+    transition: border-color var(--fast) var(--ease), transform var(--fast) var(--ease);
+  }
+  .panel:hover { border-color: var(--line-strong); }
+
+  .controls, .legend, .actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); }
+  .controls, .legend { padding: var(--s-3) var(--s-4); }
+  .legend {
+    justify-content: space-between; color: var(--ink-2); font-size: var(--t-small);
+    border-top: 1px solid var(--line);
+  }
+  .key {
+    display: inline-block; margin-right: var(--s-2); width: 10px; height: 10px;
+    border-radius: 3px; border: 1px solid currentColor; vertical-align: -1px;
+  }
+  .key.owned { background: var(--ok-soft); color: var(--ok); }
+  .key.route { background: var(--warn-soft); color: var(--warn); }
+  .key.water { background: #57D3E833; color: #57D3E8; }
+
+  /* ---------- 按钮：一种形态 ---------- */
+  button {
+    background: var(--surface-3);
+    color: var(--ink);
+    border: 1px solid var(--line-strong);
+    border-radius: var(--r-md);
+    min-height: 40px;
+    padding: var(--s-2) var(--s-4);
+    font: inherit; font-size: var(--t-body); font-weight: 500;
+    white-space: nowrap;
+    cursor: pointer;
+    transition: background var(--fast) var(--ease), border-color var(--fast) var(--ease),
+                transform var(--fast) var(--ease), color var(--fast) var(--ease);
+  }
+  button:hover:not(:disabled) { background: #262E3D; border-color: #FFFFFF2E; }
+  button:active:not(:disabled) { transform: translateY(1px); }
+  button:disabled { color: var(--ink-3); background: var(--surface-2); border-color: var(--line); cursor: default; }
+  /* 主操作：全站唯一的填充按钮，用强调色 */
+  button.primary { background: var(--accent); border-color: transparent; color: #0A1020; font-weight: 600; }
+  button.primary:hover:not(:disabled) { background: var(--accent-hi); }
+  button.primary:active:not(:disabled) { transform: translateY(1px); }
+  button.primary:disabled { background: #253247; color: #6C7A93; }
+  /* 表单提交这类「面板内的主动作」：只加一层强调描边，不用填充 ——
+     一个视图里填充按钮只留一个，否则整页到处是亮块。 */
+  button.accent { border-color: #5B8DEF66; color: var(--accent-hi); background: var(--accent-soft); }
+  button.accent:hover:not(:disabled) { border-color: var(--accent); background: #5B8DEF2E; }
+
+  /* ---------- 地图 ---------- */
+  .viewport { display: grid; place-items: center; background: #0A0C11; min-height: 300px; }
   #map { display: block; width: 100%; height: clamp(380px, 68vh, 740px); touch-action: none; cursor: grab; }
   #map.dragging { cursor: grabbing; }
   #map[hidden], #placeholder[hidden] { display: none; }
-  #placeholder { color: var(--ink-3); text-align: center; padding: 40px 28px; font-size: 13px; }
-  #mapInfo { min-height: 38px; padding: 8px 14px; border-top: 1px solid var(--stroke); color: var(--ink-2); font-size: 12.5px; }
-  /* 地图格子：极淡描边，靠底色区分 */
+  #placeholder { color: var(--ink-3); text-align: center; padding: var(--s-7) var(--s-5); font-size: var(--t-body); }
+  #mapInfo {
+    min-height: 40px; padding: var(--s-2) var(--s-4);
+    border-top: 1px solid var(--line); color: var(--ink-2); font-size: var(--t-small);
+  }
   .cell { fill: transparent; stroke: #FFFFFF0D; stroke-width: 1; }
   .cell.land, .cell.owned_hint { cursor: crosshair; }
-  .cell.land:hover, .cell.owned_hint:hover { fill: #4C8DFF26; stroke: var(--primary); stroke-width: 2; }
-  .cell.owned { fill: #3DDC9718; stroke: #3DDC9766; }
-  .cell.owned_hint { stroke: #3DDC9788; stroke-dasharray: 3 3; }
+  /* 框选模式：拖哪刷哪，光标和框都要看得见（之前这两条漏了，框选等于瞎选） */
+  #map.region-mode { cursor: crosshair; }
+  #map.region-mode.dragging { cursor: crosshair; }
+  .region-box { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 2;
+    stroke-dasharray: 5 4; pointer-events: none; }
+  .cell.land:hover, .cell.owned_hint:hover { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 2; }
+  .cell.owned { fill: #3FCF8E18; stroke: #3FCF8E66; }
+  .cell.owned_hint { stroke: #3FCF8E88; stroke-dasharray: 3 3; }
   .cell.water { fill: #57D3E820; stroke: #57D3E855; }
-  .path-line { stroke: var(--amber); stroke-width: 3.5; stroke-linecap: round; fill: none; opacity: .9; }
-  .marker { fill: #1B2029; stroke: var(--amber); stroke-width: 2; }
-  .marker.done { fill: #14351F; stroke: var(--green); }
-  .marker-text { fill: var(--ink); font: 600 16px "Microsoft YaHei UI", sans-serif; text-anchor: middle; dominant-baseline: central; }
-  .sidebar section { padding: 15px 16px; }
-  .sidebar section + section { border-top: 1px solid var(--stroke); }
-  .label { display: inline-block; padding: 2px 9px; border: 1px solid var(--stroke); border-radius: 999px;
-    font-size: 11.5px; color: var(--ink-2); margin-bottom: 9px; background: var(--surface-2); }
-  #routeStatus { overflow-wrap: anywhere; font-size: 13px; color: var(--ink-2); }
-  #routeList { padding-left: 30px; margin: 10px 0;
-    font-variant-numeric: tabular-nums; font-size: 12.5px; color: var(--ink-2); }
+  .path-line { stroke: var(--warn); stroke-width: 3.5; stroke-linecap: round; fill: none; opacity: .9; }
+  .marker { fill: var(--surface-2); stroke: var(--warn); stroke-width: 2; }
+  .marker.done { fill: #14351F; stroke: var(--ok); }
+  .marker-text {
+    fill: var(--ink); font: 600 16px "Microsoft YaHei UI", sans-serif;
+    text-anchor: middle; dominant-baseline: central;
+  }
+
+  /* ---------- 侧栏 ---------- */
+  .sidebar section { padding: var(--s-4); }
+  .sidebar section + section { border-top: 1px solid var(--line); }
+  .label {
+    display: inline-block; padding: 2px var(--s-2);
+    border: 1px solid var(--line-strong); border-radius: var(--r-full);
+    font-size: var(--t-label); color: var(--ink-2); margin-bottom: var(--s-2);
+    background: var(--surface-2);
+  }
+  #routeStatus { overflow-wrap: anywhere; font-size: var(--t-body); color: var(--ink-2); }
+  #routeList {
+    padding-left: var(--s-5); margin: var(--s-3) 0;
+    font-variant-numeric: tabular-nums; font-size: var(--t-small); color: var(--ink-2);
+  }
   #routeList:empty { display: none; }
-  #routeList li { border-bottom: 1px solid var(--stroke); padding: 5px 3px; }
-  #routeList li.current { color: var(--amber); font-weight: 600; }
-  #routeList li.done { color: var(--green); }
-  #feedback { min-height: 20px; margin-top: 9px; font-size: 12.5px; color: var(--amber); }
-  nav { display: flex; gap: 8px; margin-bottom: 16px; }
-  nav button[aria-selected="true"] { border-color: var(--primary); color: var(--primary); background: #4C8DFF14; }
+  #routeList li { border-bottom: 1px solid var(--line); padding: var(--s-1) 0; }
+  #routeList li.current { color: var(--warn); font-weight: 600; }
+  #routeList li.done { color: var(--ok); }
+  #feedback { min-height: 20px; margin-top: var(--s-2); font-size: var(--t-small); color: var(--warn); }
+
+  /* ---------- 页签 ---------- */
+  nav { display: flex; gap: var(--s-2); margin-bottom: var(--s-5); }
+  nav button { min-height: 38px; }
+  nav button[aria-selected="true"] {
+    border-color: var(--accent); color: var(--accent-hi); background: var(--accent-soft);
+  }
+
   .layout[hidden], .operations[hidden] { display: none; }
-  /* 城建页：宽屏自动多列。资源/编队整行铺满，三个队列面板并排 */
-  .operations { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 16px; align-items: start; }
+
+  /* ---------- 城建页 ---------- */
+  .operations {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+    gap: var(--s-4); align-items: start;
+  }
   .operations > * { min-width: 0; }
   .operations > .span-all { grid-column: 1 / -1; }
-  .operations > header { margin: 0; border: none; padding: 0 2px 2px; }
-  /* 三个队列面板高度对齐，避免参差不齐 */
+  .operations > header { margin: 0; border: none; padding: 0 2px var(--s-1); }
   .operations > .panel:not(.span-all) { display: flex; flex-direction: column; }
   .operations > .panel:not(.span-all) > .orders { flex: 1 1 auto; }
-  .operations .panel { padding: 16px; }
-  .operations .panel > p { margin-bottom: 10px; }
-  /* 事实列表：无边框小卡片行，替代原来的通栏分隔线 */
-  /* 编队卡片：参考旧版控制台（名字+位置chip / 兵力圆点+血条+百分比 / 状态+兵种+倒计时） */
-  .armies { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-    gap: 8px; margin: 0 0 14px; padding: 0; list-style: none; }
-  .army { background: var(--surface-2); border: 1px solid transparent; border-radius: 11px;
-    padding: 9px 11px; display: grid; gap: 5px; }
-  .army.busy { border-color: #4C8DFF33; }
-  .army.away { opacity: .72; }
-  .army-top { display: flex; align-items: center; gap: 8px; }
-  .army-name { font-size: 13.5px; font-weight: 600; color: var(--ink); }
-  .army-pos { margin-left: auto; font-size: 11px; padding: 1px 8px; border-radius: 999px;
-    background: var(--surface-3); color: var(--ink-2); white-space: nowrap; }
-  .army-pos.home { color: #8FC7FF; background: #4C8DFF1F; }
+  .operations .panel { padding: var(--s-4); }
+  .operations .panel > p { margin-bottom: var(--s-3); }
+
+  /* ---------- 编队卡片 ---------- */
+  .armies {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: var(--s-3); margin: 0 0 var(--s-4); padding: 0; list-style: none;
+  }
+  .army {
+    background: var(--surface-2);
+    border: 1px solid var(--line);
+    border-radius: var(--r-md);
+    padding: var(--s-3);
+    display: grid; gap: var(--s-2);
+    transition: border-color var(--fast) var(--ease), transform var(--fast) var(--ease);
+  }
+  .army:hover { border-color: var(--line-strong); transform: translateY(-2px); }
+  .army.busy { border-color: #5B8DEF40; }
+  .army.away { opacity: .75; }
+  .army-top { display: flex; align-items: center; gap: var(--s-2); }
+  .army-name { font-size: var(--t-card); font-weight: 600; color: var(--ink); }
+  .army-pos {
+    margin-left: auto; font-size: var(--t-label); padding: 2px var(--s-2);
+    border-radius: var(--r-full); background: var(--surface-3); color: var(--ink-2);
+    white-space: nowrap;
+  }
+  .army-pos.home { color: #8FC7FF; background: var(--accent-soft); }
   .army-pos.away { color: var(--ink-3); }
-  .army-row2 { display: flex; align-items: center; gap: 8px; }
+  .army-row2 { display: flex; align-items: center; gap: var(--s-2); }
   .dots { display: flex; gap: 3px; flex: 0 0 auto; }
-  .dots i { width: 7px; height: 7px; border-radius: 50%; background: var(--green); }
-  .dots i.empty { background: transparent; border: 1.2px solid var(--stroke-hi); }
-  .hpbar { flex: 1 1 auto; height: 5px; border-radius: 3px; background: var(--surface-3); overflow: hidden; }
-  .hpbar > i { display: block; height: 100%; border-radius: 3px; background: var(--green); }
-  .hpbar.mid > i { background: var(--amber); }
-  .hpbar.low > i { background: var(--red); }
-  .hp-pct { font-size: 11px; color: var(--ink-3); font-variant-numeric: tabular-nums; min-width: 32px; text-align: right; }
-  .army-row3 { display: flex; align-items: baseline; gap: 8px; font-size: 11.5px; }
+  .dots i { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); }
+  .dots i.empty { background: transparent; border: 1.2px solid var(--line-strong); }
+  .hpbar { flex: 1 1 auto; height: 5px; border-radius: var(--r-full); background: var(--surface-3); overflow: hidden; }
+  .hpbar > i { display: block; height: 100%; border-radius: var(--r-full); background: var(--ok); }
+  .hpbar.mid > i { background: var(--warn); }
+  .hpbar.low > i { background: var(--bad); }
+  .hp-pct {
+    font-size: var(--t-label); color: var(--ink-3);
+    font-variant-numeric: tabular-nums; min-width: 36px; text-align: right;
+  }
+  .army-row3 { display: flex; align-items: baseline; gap: var(--s-2); font-size: var(--t-small); }
   .army-state { font-weight: 600; }
   .army-mix { color: var(--ink-2); flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .army-eta { color: var(--ink-3); font-variant-numeric: tabular-nums; }
-  .army-empty { color: var(--ink-3); font-size: 12.5px; }
-  /* 士兵截图：固定高度、宽度按原比例，不拉伸变形 */
-  .unit-strip { display: block; height: 46px; width: auto; max-width: 100%;
-    image-rendering: pixelated; border-radius: 5px; margin-top: 2px; }
-  .facts { display: grid; gap: 4px; margin: 0 0 14px; padding: 0; list-style: none; }
-  .facts li { padding: 6px 9px; background: var(--surface-2); border-radius: 8px; font-size: 12.5px; color: var(--ink-2); }
-  .orders li { padding: 6px 0; border-bottom: 1px solid var(--stroke); font-size: 13px; }
-  .orders { margin: 10px 0 0; padding-left: 26px; }
-  .orders li > div { display: flex; gap: 8px; align-items: center; justify-content: space-between; }
-  .orders li:first-child { color: var(--amber); }
-  select, input { max-width: 100%; background: var(--bg); color: var(--ink); border: 1px solid var(--stroke);
-    border-radius: 8px; padding: 7px 9px; font: inherit; font-size: 13px; }
-  select:focus, input:focus { outline: none; border-color: var(--primary); }
-  input[type=number] { width: 82px; }
-  form { display: flex; flex-wrap: wrap; align-items: end; gap: 9px; }
-  form label { display: grid; gap: 4px; color: var(--ink-3); font-size: 12px; }
-  #soldierStrip { display: block; width: min(100%, 420px); margin: 0 0 10px; border-radius: 8px; }
+  .army-empty { color: var(--ink-3); font-size: var(--t-small); }
+
+  /* 士兵截图：固定高度、等比缩放 */
+  .unit-strip {
+    display: block; height: 46px; width: auto; max-width: calc(100% - 8px);
+    image-rendering: pixelated; border-radius: var(--r-sm); margin: var(--s-1) 0 0 var(--s-2);
+  }
+  .unit-empty {
+    margin: var(--s-2) 0 0 var(--s-2); padding: var(--s-2) var(--s-3);
+    border-radius: var(--r-sm); border: 1px dashed var(--line-strong);
+    color: var(--ink-3); font-size: var(--t-label);
+  }
+
+  /* ---------- 提示条 ---------- */
+  .cache-ask {
+    padding: var(--s-3) var(--s-4); background: var(--warn-soft);
+    border-top: 1px solid #E8B45C44; font-size: var(--t-small);
+  }
+  .cache-ask[hidden] { display: none; }
+
+  .mode-bar {
+    display: flex; align-items: center; gap: var(--s-4); flex-wrap: wrap;
+    padding: var(--s-2) var(--s-4); font-size: var(--t-small); color: var(--ink-2);
+    background: var(--surface-2); border-top: 1px solid var(--line);
+  }
+  .mode-bar label { display: inline-flex; align-items: center; gap: var(--s-1); cursor: pointer; }
+
+  .skip-list { margin: 0; padding: 0; list-style: none; font-size: var(--t-small); }
+  .skip-list li {
+    display: flex; gap: var(--s-2); padding: var(--s-2) var(--s-4);
+    color: var(--ink-2); border-top: 1px solid var(--line);
+  }
+  .skip-list li b { color: var(--warn); font-weight: 600; }
+
+  /* ---------- 列表 ---------- */
+  .combo-list { margin: 0 0 var(--s-3); padding: 0; list-style: none; display: grid; gap: var(--s-2); }
+  .combo-list li {
+    display: flex; align-items: center; gap: var(--s-2); justify-content: space-between;
+    padding: var(--s-2) var(--s-3); background: var(--surface-2);
+    border-radius: var(--r-sm); font-size: var(--t-small);
+  }
+  .combo-list li.muted { color: var(--ink-3); background: transparent; padding: var(--s-1) 0; }
+
+  .tune {
+    border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface-1);
+    padding: var(--s-2) var(--s-3); font-size: var(--t-small); color: var(--ink-2);
+  }
+  .tune summary { cursor: pointer; color: var(--ink-3); }
+  .tune summary:hover { color: var(--ink); }
+  .tune[open] { padding-bottom: var(--s-3); }
+  .tune[open] summary { margin-bottom: var(--s-2); }
+  .tune .facts { margin: var(--s-2) 0 0; }
+
+  .facts { display: grid; gap: var(--s-1); margin: 0 0 var(--s-4); padding: 0; list-style: none; }
+  .facts li {
+    padding: var(--s-2) var(--s-3); background: var(--surface-2);
+    border-radius: var(--r-sm); font-size: var(--t-small); color: var(--ink-2);
+  }
+
+  .orders { margin: var(--s-3) 0 0; padding-left: var(--s-5); }
+  .orders li { padding: var(--s-2) 0; border-bottom: 1px solid var(--line); font-size: var(--t-body); }
+  .orders li > div { display: flex; gap: var(--s-2); align-items: center; justify-content: space-between; }
+  .orders li:first-child { color: var(--warn); }
+
+  /* ---------- 表单 ---------- */
+  select, input {
+    max-width: 100%; min-height: 40px;
+    background: var(--bg); color: var(--ink);
+    border: 1px solid var(--line-strong); border-radius: var(--r-md);
+    padding: var(--s-2) var(--s-3);
+    font: inherit; font-size: var(--t-body);
+    transition: border-color var(--fast) var(--ease);
+  }
+  select:hover, input:hover { border-color: #FFFFFF33; }
+  select:focus, input:focus { outline: none; border-color: var(--accent); }
+  input[type=number] { width: 88px; }
+  form { display: flex; flex-wrap: wrap; align-items: end; gap: var(--s-3); }
+  form label { display: grid; gap: var(--s-1); color: var(--ink-2); font-size: var(--t-label); }
+
+  #soldierStrip { display: block; width: min(100%, 420px); margin: 0 0 var(--s-3); border-radius: var(--r-sm); }
   #soldierStrip[hidden] { display: none; }
-  #opsFeedback { color: var(--amber); font-size: 12.5px; }
-  /* 资源条 */
-  /* 资源：自适应横向平铺 —— 按容器宽度自动决定一行放几格，永远铺满、不滚动 */
-  .res-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(115px, 1fr));
-    gap: 8px; margin-bottom: 14px; }
-  .res { background: var(--surface-2); border-radius: 10px; padding: 9px 11px; min-width: 0; }
-  .res.stock { background: #1A1F28; }
-  .res-name { font-size: 11.5px; color: var(--ink-3); margin-bottom: 3px; }
-  .res-val { font-size: 15px; font-weight: 600; font-variant-numeric: tabular-nums; letter-spacing: .2px; }
-  .res-bar { height: 4px; border-radius: 2px; background: var(--stroke); margin-top: 6px; overflow: hidden; }
-  .res-bar > i { display: block; height: 100%; border-radius: 2px; background: var(--primary); }
-  .res.low .res-val { color: var(--amber); }
-  .res.low .res-bar > i { background: var(--amber); }
-  .res.empty .res-val { color: var(--red); }
-  .res.empty .res-bar > i { background: var(--red); }
-  /* 队列暂停提示 */
-  .guard { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 11px;
-    background: #F2B45A1F; color: var(--amber); border: 1px solid #F2B45A44; margin-left: 6px; }
-  @media (max-width: 820px) {
-    main { padding: 14px; }
+  #opsFeedback { color: var(--warn); font-size: var(--t-small); }
+
+  /* ---------- 资源 ---------- */
+  .res-row {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(105px, 1fr));
+    gap: var(--s-2); margin-bottom: var(--s-4);
+  }
+  .res {
+    background: var(--surface-2); border: 1px solid var(--line);
+    border-radius: var(--r-md); padding: var(--s-2) var(--s-3); min-width: 0;
+  }
+  .res.stock { background: #151A24; }
+  .res-name { font-size: var(--t-label); color: var(--ink-3); margin-bottom: var(--s-1); }
+  .res-val {
+    font-size: var(--t-stat); font-weight: 600;
+    font-variant-numeric: tabular-nums; letter-spacing: -.1px; line-height: 1.2;
+  }
+  .res-bar { height: 4px; border-radius: var(--r-full); background: var(--surface-3); margin-top: var(--s-2); overflow: hidden; }
+  .res-bar > i { display: block; height: 100%; border-radius: var(--r-full); background: var(--accent); }
+  .res.low .res-val { color: var(--warn); }
+  .res.low .res-bar > i { background: var(--warn); }
+  .res.empty .res-val { color: var(--bad); }
+  .res.empty .res-bar > i { background: var(--bad); }
+
+  .guard {
+    display: inline-block; padding: 1px var(--s-2); border-radius: var(--r-full);
+    font-size: var(--t-label); background: var(--warn-soft); color: var(--warn);
+    border: 1px solid #E8B45C44; margin-left: var(--s-2);
+  }
+
+  /* ---------- 离线提示 ---------- */
+  .offline { border-color: #E8B45C55; background: #E8B45C10; }
+  .offline p { margin: 0 0 var(--s-3); color: var(--ink-2); line-height: 1.65; }
+  .offline a.button {
+    display: inline-flex; align-items: center; min-height: 40px;
+    padding: var(--s-2) var(--s-4); border-radius: var(--r-md);
+    background: var(--accent); color: #0A1020; text-decoration: none;
+    font-size: var(--t-body); font-weight: 600;
+  }
+  .offline a.button:hover { background: var(--accent-hi); color: #0A1020; }
+
+  /* ---------- 路线卡片 ---------- */
+  .route-cards { margin: 0 0 var(--s-3); padding: 0; list-style: none; display: grid; gap: var(--s-2); }
+  .route-card {
+    padding: var(--s-3); border-radius: var(--r-md); background: var(--surface-2);
+    border: 1px solid var(--line); display: grid; gap: var(--s-2);
+    transition: border-color var(--fast) var(--ease), transform var(--fast) var(--ease);
+  }
+  .route-card:hover { border-color: var(--line-strong); transform: translateY(-2px); }
+  .route-card.current { border-color: #5B8DEF4D; background: #172033; }
+  .route-card.paused { opacity: .7; }
+  .route-head { display: flex; align-items: center; gap: var(--s-2); font-size: var(--t-small); flex-wrap: wrap; }
+  .route-head b { font-size: var(--t-card); }
+  .route-badge {
+    font-size: var(--t-label); padding: 2px var(--s-2); border-radius: var(--r-full);
+    background: var(--surface-3); color: var(--ink-3); white-space: nowrap;
+  }
+  .route-badge.on { background: var(--ok-soft); color: var(--ok); }
+  .route-badge.wait { background: var(--warn-soft); color: var(--warn); }
+  .route-progress {
+    font-size: var(--t-small); color: var(--ink-2);
+    font-variant-numeric: tabular-nums; margin-left: auto;
+  }
+  .route-card .actions { gap: var(--s-2); }
+  .route-steps {
+    padding-left: var(--s-5); margin: var(--s-2) 0 0;
+    font-variant-numeric: tabular-nums; font-size: var(--t-small);
+    color: var(--ink-2); max-height: 220px; overflow: auto;
+  }
+  .route-steps:empty { display: none; }
+  .route-steps li { border-bottom: 1px solid var(--line); padding: var(--s-1) 0; }
+  .route-steps li.current { color: var(--warn); font-weight: 600; }
+  .route-steps li.done { color: var(--ok); }
+
+  /* ---------- 小队卡片 ---------- */
+  .squad-list { margin: 0 0 var(--s-3); padding: 0; list-style: none; display: grid; gap: var(--s-2); }
+  .squad {
+    padding: var(--s-3); border-radius: var(--r-md); background: var(--surface-2);
+    border: 1px solid var(--line); display: grid; gap: var(--s-2);
+    transition: border-color var(--fast) var(--ease), transform var(--fast) var(--ease);
+  }
+  .squad:hover { border-color: var(--line-strong); transform: translateY(-2px); }
+  .squad.active { border-color: #3FCF8E40; background: #16241E; }
+  .squad.for-this-route { box-shadow: 0 0 0 1px #5B8DEF33 inset; }
+  .squad-head { display: flex; align-items: center; gap: var(--s-2); flex-wrap: wrap; }
+  .squad-head b { font-size: var(--t-card); }
+  .squad-route {
+    font-size: var(--t-label); padding: 2px var(--s-2); border-radius: var(--r-full);
+    background: var(--surface-3); color: var(--ink-3);
+  }
+  .squad-route.here { background: var(--accent-soft); color: #A9C8FF; }
+  .squad-members { font-size: var(--t-small); color: var(--ink-2); }
+  .squad-form { display: flex; flex-wrap: wrap; gap: var(--s-2) var(--s-3); align-items: end; }
+  .squad-armies select, #squadArmies { min-width: 168px; }
+  .squad-list li.muted { color: var(--ink-3); font-size: var(--t-small); padding: var(--s-2) 0; }
+
+  .i-sm { width: 14px; height: 14px; }
+
+  /* ---------- 响应式 ---------- */
+  @media (max-width: 900px) {
+    main { padding: var(--s-4); }
     .layout { grid-template-columns: 1fr; }
     .operations { grid-template-columns: 1fr; }
-    header { align-items: start; flex-direction: column; }
+    header { align-items: start; flex-direction: column; gap: var(--s-2); }
+  }
+  @media (max-width: 640px) {
+    main { padding: var(--s-3); }
+    h1 { font-size: 22px; }
+    .armies { grid-template-columns: 1fr; }
+    .res-row { grid-template-columns: repeat(auto-fit, minmax(92px, 1fr)); }
+    form { gap: var(--s-2); }
+    form label { width: 100%; }
+    form input, form select, form button { width: 100%; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; animation: none !important; }
+    .army:hover, .route-card:hover, .squad:hover { transform: none; }
   }
 </style>
 </head>
@@ -179,9 +505,13 @@
   </header>
   <section class="panel runtime" id="runtime" data-mode="waiting" aria-label="脚本运行状态">
     <span class="runtime-label" id="runtimeLabel">运行状态</span>
-    <p id="runtimeDetail" role="status">等待脚本连接</p>
+    <p id="runtimeDetail" role="status">正在连接脚本…</p>
     <time class="muted" id="runtimeSince"></time>
     <p class="muted" id="runtimeRecent" hidden></p>
+  </section>
+  <section class="panel offline" id="offline" hidden>
+    <p><b id="offlineTitle">脚本没在运行。</b><span id="offlineText">控制台还开着，但脚本已经停止，所以读不到地图，也没法开荒。</span></p>
+    <a class="button" id="backToConsole" href="http://127.0.0.1:8765/jwm/">回控制台点「启动脚本」</a>
   </section>
   <nav aria-label="控制台页面">
     <button id="mapTab" aria-selected="true">开荒地图</button>
@@ -192,6 +522,9 @@
       <div class="controls" aria-label="地图浏览">
         <button data-pan="home">主城</button>
         <button id="readMap">读取当前视野</button>
+        <button id="regionMode" title="在地图上拖出一个方框，只刷新这一块">框选刷新</button>
+        <button id="syncNow" title="把模拟器镜头移到这里，重新截一帧拼进地图">同步模拟器到这里</button>
+        <span class="muted" id="syncHint"></span>
       </div>
       <div class="viewport">
         <p id="placeholder">进入游戏后，脚本会读取主城周边地图。</p>
@@ -204,6 +537,19 @@
         <span><i class="key owned"></i>已确认占领</span>
         <span><i class="key route"></i>开荒路线</span>
         <span><i class="key water"></i>水域</span>
+      </div>
+      <div class="mode-bar">
+        <span>打不动的地块：</span>
+        <label><input type="radio" name="routeMode" value="strict"> 严格听我的（脚本不动路线）</label>
+        <label><input type="radio" name="routeMode" value="flexible"> 允许脚本自动绕开</label>
+      </div>
+      <ul id="skipList" class="skip-list"></ul>
+      <div id="cacheAsk" class="cache-ask" hidden>
+        <p><b>上次的地图缓存可用。</b>这次要沿用还是重新读取？</p>
+        <div class="actions" style="margin-top:8px">
+          <button class="accent" id="useCache">沿用上次（快）</button>
+          <button id="freshScan">重新读取（慢，但最新）</button>
+        </div>
       </div>
       <p id="mapInfo" aria-live="polite">等待脚本连接</p>
     </div>
@@ -218,11 +564,34 @@
         </div>
       </section>
       <section>
+        <h2>开荒小队 <span class="muted" id="squadHint"></span></h2>
+        <p class="muted">一个小队就是一组一起出征的编队。可以建多支，各自绑定一条路线，互不串台。没有小队时脚本才自己挑兵。</p>
+        <ul id="squadList" class="squad-list"></ul>
+        <form id="addSquad" class="squad-form">
+          <label>小队名 <input id="squadName" maxlength="20" placeholder="例如 近战主力" required></label>
+          <label>绑定路线
+            <select id="squadRoute">
+              <option value="">不绑定（所有路线都能用）</option>
+            </select>
+          </label>
+          <label class="squad-armies">成员 <select id="squadArmies" multiple size="4"></select></label>
+          <button type="submit" class="accent">保存小队</button>
+        </form>
+        <p id="squadMessage" role="status"></p>
+      </section>
+      <section>
+        <h2>已提交路线 <span class="muted" id="routeCount"></span></h2>
+        <p class="muted">可以有多条：脚本会自动轮转，一条在等行军时就推进另一条。每条可单独暂停/删除。</p>
+        <ul id="routeCards" class="route-cards"></ul>
+        <ol id="routeSteps" class="route-steps"></ol>
+      </section>
+      <section>
         <h2 id="listTitle">规划路线</h2>
         <p class="muted">从领地边上的一格开始，按上下左右依次点选。可拖动地图、滚轮缩放。</p>
         <ol id="routeList"></ol>
         <div class="actions" style="margin-top: 10px">
           <button id="start" class="primary" disabled>开始开荒</button>
+          <button id="addRoute" disabled title="把这条草稿作为一条新路线加进去，原来的路线保留">再加一条路线</button>
           <button id="undo" disabled>撤销</button>
           <button id="clear" disabled>清空草稿</button>
           <button id="autoplan" disabled title="按螺旋开路自动选一条路线，填进草稿后可再编辑">自动规划</button>
@@ -242,65 +611,79 @@
       <button id="stopScript" title="停止脚本（相当于关掉运行窗口）">停止脚本</button>
     </header>
     <section class="panel span-all">
-      <h2>资源</h2>
+      <h2><svg class="i i-sm" aria-hidden="true"><use href="#i-coins"/></svg>资源</h2>
       <p class="muted" id="resTime">等待读取顶部资源条</p>
       <div class="res-row" id="resRow"></div>
       <p class="muted">建造、造兵、练兵都消耗资源。资源不足时对应队列会自动暂停，不会反复空试。</p>
     </section>
     <section class="panel span-all">
-      <h2>编队情况</h2>
+      <h2><svg class="i i-sm" aria-hidden="true"><use href="#i-sword"/></svg>编队情况</h2>
       <p class="muted" id="gameRecruit">游戏招募队列 · 等待读取</p>
+      <p class="muted" id="armyFresh"></p>
       <ul id="armyFacts" class="armies"></ul>
     </section>
     <section class="panel">
-      <h2>建筑等级</h2>
+      <h2><svg class="i i-sm" aria-hidden="true"><use href="#i-building"/></svg>建筑等级</h2>
       <p class="muted" id="gameBuild">游戏施工队列 · 等待读取</p>
       <ul id="buildFacts" class="facts"></ul>
-      <h2>脚本升级队列 <span class="muted" id="buildCount"></span></h2>
+      <h2><svg class="i i-sm" aria-hidden="true"><use href="#i-hammer"/></svg>脚本升级队列 <span class="muted" id="buildCount"></span></h2>
       <p class="muted">每项升一级。可重复添加同一建筑，等游戏施工位空出后按顺序执行。</p>
       <form id="addBuild">
         <label>建筑 <select id="building"></select></label>
         <label>连升几级 <input id="levels" type="number" min="1" max="1000" value="1" required></label>
-        <button type="submit" class="primary">加入队列</button>
+        <button type="submit" class="accent">加入队列</button>
       </form>
       <p id="buildMessage" role="status"></p>
       <ol id="buildQueue" class="orders"></ol>
     </section>
     <section class="panel">
-      <h2>脚本造兵队列 <span class="muted" id="recruitCount"></span></h2>
+      <h2><svg class="i i-sm" aria-hidden="true"><use href="#i-users"/></svg>脚本造兵队列 <span class="muted" id="recruitCount"></span></h2>
       <p class="muted">按兵营中从左到右的顺序选择兵种格。招募受编队人数上限和游戏招募位约束。</p>
       <img id="soldierStrip" alt="兵营兵种格，从左到右 1 至 5" hidden>
       <form id="addRecruit">
         <label>编队 <select id="army"></select></label>
         <label>兵种 <select id="slot"></select></label>
         <label>人数 <input id="soldiers" type="number" min="1" max="1000" value="1" required></label>
-        <button type="submit" class="primary">加入队列</button>
+        <button type="submit" class="accent">加入队列</button>
       </form>
       <p id="recruitMessage" role="status"></p>
       <ol id="recruitQueue" class="orders"></ol>
     </section>
     <section class="panel">
-      <h2>校场练兵队列 <span class="muted" id="drillCount"></span></h2>
+      <h2><svg class="i i-sm" aria-hidden="true"><use href="#i-anvil"/></svg>校场练兵队列 <span class="muted" id="drillCount"></span></h2>
       <p class="muted">按编队安排练兵人数。编队必须在主城；资源不足或训练队列满时会自动暂停，等条件恢复再继续。</p>
       <form id="addDrill">
         <label>编队 <select id="drillArmy"></select></label>
+        <label>练哪个兵 <select id="drillSlot">
+          <option value="0">自动（按顺序试）</option>
+          <option value="1">第 1 个</option><option value="2">第 2 个</option>
+          <option value="3">第 3 个</option><option value="4">第 4 个</option>
+          <option value="5">第 5 个</option>
+        </select></label>
         <label>练几个兵 <input id="drillCountInput" type="number" min="1" max="9" value="3" required></label>
-        <button type="submit" class="primary">加入练兵队列</button>
+        <button type="submit" class="accent">加入练兵队列</button>
       </form>
       <p id="drillMessage" role="status"></p>
       <ol id="drillQueue" class="orders"></ol>
     </section>
+    <details class="tune span-all" id="tuneBox">
+      <summary>按账号自动调整的参数 · <span id="tuneProfile">等待账号信息…</span></summary>
+      <p class="muted">config.yaml 里写 null 的项由脚本按账号现状自动决定（主城升级后跟着变）；写了具体数字的项不动。</p>
+      <ul id="tuneList" class="facts"></ul>
+    </details>
+    <p class="muted span-all">开荒小队已经搬到「开荒地图」页，放在开荒进度下面 —— 在那里配好就能直接对应到正在跑的路线。</p>
   </div>
-</main>
 <script>
   const $ = id => document.getElementById(id);
   const panButtons = [...document.querySelectorAll("[data-pan]")];
   const draft = [];
   let state = null, atlasKey = "", busy = false, online = false, write = 0;
+  let offlineNotified = false, starting = false, failureSince = 0;
   let syncTimer;
   let center = [0, 0], height = 740, gesture = null, dragged = false;
   let atlasTiles = new Map(), fillTimer, movedViewport = false;
   let fillBounds = "", triedCenters = new Set(), stalled = 0, pendingFill = null;
+  let regionSelect = false, syncSoon = null, regionStart = null, regionEnd = null;
   const tileSize = 67.5;
   const world = p => [(p[0] - state.home[0]) * tileSize, (state.home[1] - p[1]) * tileSize];
   const gamePoint = () => [state.home[0] + Math.round(center[0] / tileSize),
@@ -482,20 +865,30 @@
     const mapReady = Boolean(view);
     $("map").toggleAttribute("hidden", !mapReady);
     $("placeholder").hidden = mapReady;
-    $("mapInfo").textContent = !online ? "等待脚本连接" : state.scanning ? "正在补齐当前视野…" :
-      state.warming ? "正在预读主城周边地图…" :
-      state.mapError || (view ? "拖动或缩放时自动补图 · 点击地块选点" : "等待进入大地图");
+    $("mapInfo").textContent = !online
+      ? (starting ? "脚本正在启动，地图就绪后会自动显示，请稍候…"
+                  : "脚本没在运行，请回控制台点「启动脚本」。")
+      : state?.scanning ? "正在补齐当前视野…" :
+      state?.warming ? "正在预读主城周边地图…" :
+      state?.mapError || (view ? "拖动或缩放时自动补图 · 点击地块选点" : "等待进入大地图");
     $("progress").textContent = path.length ? `${index} / ${path.length} 已占领 · ${active ? "执行中" : index === path.length ? "完成" : "已暂停"}` : "等待选点";
     $("routeStatus").textContent = state?.status ?? "提交路线后，从第一格开始占领。";
-    $("listTitle").textContent = draft.length ? `路线草稿 · ${draft.length} 格` : path.length ? "已提交路线" : "规划路线";
-    $("start").textContent = path.length ? "提交新路线" : "开始开荒";
+    $("listTitle").textContent = draft.length ? `路线草稿 · ${draft.length} 格` : "规划路线";
+    $("start").textContent = path.length ? "替换当前路线" : "开始开荒";
     $("start").disabled = busy || !online || !view || !draft.length;
+    $("addRoute").disabled = busy || !online || !view || !draft.length;
     $("pause").disabled = busy || !online || !active;
     $("resume").disabled = busy || !online || active || index >= path.length;
     $("undo").disabled = $("clear").disabled = !draft.length;
     $("autoplan").disabled = busy || !online || !view;
     for (const button of panButtons) button.disabled = !view;
-    $("readMap").disabled = busy || !online || state.scanning;
+    $("readMap").disabled = busy || !online || state?.scanning;
+    $("cacheAsk").hidden = !state?.pendingCache;
+    for (const r of document.querySelectorAll('input[name="routeMode"]')) {
+      r.checked = r.value === (state?.routeMode || "strict");
+    }
+    renderSkips(state?.skips || []);
+    renderRoutes(state?.routes || [], path, index);
     $("routeList").replaceChildren(...(draft.length ? draft : path).map((p, i) => {
       const item = document.createElement("li");
       item.textContent = position(p);
@@ -510,6 +903,9 @@
     }));
     draw();
     if (view) moveTo(...center);
+    if (state?.operations) {
+      renderSquads(state.operations.squads || [], state.operations.activeSquad, state.routeKey || "");
+    }
     renderOps();
   }
   const taskNames = { idle: "空闲", game: "游戏连接", map: "地图扫描", refresh: "状态刷新",
@@ -521,9 +917,26 @@
     const mode = live?.mode ?? "offline";
     $("runtime").dataset.mode = mode;
     $("runtimeLabel").textContent = live ? modeNames[mode] + " · " + (taskNames[live.task] || live.task) : "运行状态";
-    const detail = live?.detail ?? "等待脚本连接";
+    const detail = live?.detail ?? "脚本没在运行";
     if ($("runtimeDetail").textContent !== detail) $("runtimeDetail").textContent = detail;
     $("runtimeSince").textContent = live ? atTime(live.since) : "";
+    if (!online) {
+      // 离线也分两种：脚本已经在启动（进程活着，网页还没就绪）和真的没运行。
+      // 混在一起会让人以为脚本挂了，然后去点停止。
+      $("runtimeDetail").textContent = starting ? "脚本正在启动，正在连接地图…" : "脚本没在运行";
+    }
+    // 离线时明确告诉用户去控制台启动，而不是一直「等待脚本连接」
+    $("offline").hidden = online;
+    if (!online) {
+      $("offlineTitle").textContent = starting ? "脚本正在启动…" : "脚本没在运行。";
+      $("offlineText").textContent = starting
+        ? "进程已经起来了，正在读取游戏和地图，通常需要几十秒。这个页面会自动连上，请不要点停止。"
+        : "控制台还开着，但脚本已经停止，所以读不到地图，也没法开荒。";
+      $("backToConsole").hidden = starting;
+      // 通过 /map/ 代理打开时，控制台和它同源；直接开 8766 时用回环地址兜底。
+      $("backToConsole").href = location.pathname.startsWith("/map/")
+        ? location.origin + "/jwm/" : "http://127.0.0.1:8765/jwm/";
+    }
     const recent = online ? state.recentEvent : null;
     $("runtimeRecent").hidden = !recent || recent.since === live?.since;
     $("runtimeRecent").textContent = recent ? "最近结果 · " + atTime(recent.since) + " · " + recent.detail : "";
@@ -557,6 +970,12 @@
   $("undo").onclick = () => { draft.pop(); $("feedback").textContent = ""; render(); };
   $("clear").onclick = () => { draft.length = 0; $("feedback").textContent = ""; render(); };
   $("start").onclick = () => command("start", { path: draft });
+  $("addRoute").onclick = () => command("start", { path: draft, mode: "add" });
+  $("useCache").onclick = () => command("use_cache");
+  $("freshScan").onclick = () => command("fresh_scan");
+  for (const r of document.querySelectorAll('input[name="routeMode"]')) {
+    r.onchange = () => command("route_mode", { mode: r.value });
+  }
   $("autoplan").onclick = () => command("autoplan", { count: 30 });
   $("pause").onclick = () => command("pause");
   $("resume").onclick = () => command("resume");
@@ -573,11 +992,52 @@
     stalled = 0;
     command("scan", state?.home ? { center: gamePoint(), viewport: visibleBounds() } : {});
   };
+  $("regionMode").onclick = () => {
+    regionSelect = !regionSelect;
+    $("regionMode").setAttribute("aria-pressed", String(regionSelect));
+    board.classList.toggle("region-mode", regionSelect);
+    $("syncHint").textContent = regionSelect
+      ? "在地图上拖出一个方框，只刷新这一块。" : "";
+    if (!regionSelect) clearRegionBox();
+  };
+  $("syncNow").onclick = () => {
+    $("syncHint").textContent = "正在把模拟器镜头移到这里并重新截图…";
+    command("scan", state?.home ? { center: gamePoint(), viewport: visibleBounds() } : {});
+  };
   const board = $("map");
+  // 屏幕像素 → viewBox → 游戏坐标（框选和拖拽都靠它）
+  function boardPoint(e) {
+    const r = board.getBoundingClientRect();
+    const vb = board.viewBox.baseVal;
+    if (!r.width || !r.height) return [0, 0];
+    return [vb.x + (e.clientX - r.left) * (vb.width / r.width),
+            vb.y + (e.clientY - r.top) * (vb.height / r.height)];
+  }
+  const pointToGame = p => [state.home[0] + Math.round(p[0] / tileSize),
+                            state.home[1] - Math.round(p[1] / tileSize)];
+  function syncSimulator() {
+    // 用户在网页上拖动之后，让模拟器跟到同一块地，再截一帧拼进来。
+    // 但只跟「主城附近、能快速走到」的位置：拖到很远的未扫描区时不自动折腾模拟器，
+    // 而是提示用「同步模拟器到这里」，避免一次拖动就让镜头跑很久、还把拼图打乱。
+    if (!online || busy || !state?.home || !state?.view) return;
+    const p = gamePoint();
+    const dist = Math.max(Math.abs(p[0] - state.home[0]), Math.abs(p[1] - state.home[1]));
+    if (dist > 12) {
+      $("syncHint").textContent = "这里离主城较远（" + dist + " 格），点「同步模拟器到这里」才会真的移动镜头。";
+      return;
+    }
+    clearTimeout(syncSoon);
+    $("syncHint").textContent = "正在让模拟器跟到这个位置…";
+    syncSoon = setTimeout(() => {
+      command("scan", { center: gamePoint(), viewport: visibleBounds() }, true);
+    }, 300);
+  }
   board.onpointerdown = e => {
     if (e.button !== 0) return;
-    gesture = { id: e.pointerId, x: e.clientX, y: e.clientY, center: [...center] };
+    gesture = { id: e.pointerId, x: e.clientX, y: e.clientY, center: [...center],
+      region: regionSelect, start: regionSelect ? boardPoint(e) : null };
     dragged = false;
+    if (regionSelect) { regionStart = gesture.start; regionEnd = null; }
   };
   board.onpointermove = e => {
     if (gesture?.id !== e.pointerId) return;
@@ -586,13 +1046,52 @@
     if (!dragged) board.setPointerCapture(e.pointerId);
     dragged = true;
     movedViewport = true;
+    if (gesture.region) {
+      regionEnd = boardPoint(e);
+      drawRegion(gesture.start, regionEnd);
+      return;
+    }
     board.classList.add("dragging");
     const scale = board.viewBox.baseVal.height / board.clientHeight;
     moveTo(gesture.center[0] - dx * scale, gesture.center[1] - dy * scale);
   };
+  function drawRegion(a, b) {
+    let box = $("regionBox");
+    if (!box) {
+      box = svg("rect", { id: "regionBox", class: "region-box" });
+      $("markers").append(box);
+    }
+    box.setAttribute("x", Math.min(a[0], b[0]));
+    box.setAttribute("y", Math.min(a[1], b[1]));
+    box.setAttribute("width", Math.abs(a[0] - b[0]));
+    box.setAttribute("height", Math.abs(a[1] - b[1]));
+  }
+  function clearRegionBox() {
+    const box = $("regionBox");
+    if (box) box.remove();
+  }
   function finishPan() {
+    const g = gesture;
     gesture = null;
     board.classList.remove("dragging");
+    if (!g || !dragged) return;
+    if (g.region) {
+      if (!regionStart || !regionEnd) return;
+      const a = pointToGame(regionStart), b = pointToGame(regionEnd);
+      const region = [Math.min(a[0], b[0]), Math.min(a[1], b[1]),
+                      Math.max(a[0], b[0]), Math.max(a[1], b[1])];
+      regionSelect = false;
+      $("regionMode").setAttribute("aria-pressed", "false");
+      $("map").classList.remove("region-mode");
+      clearRegionBox();
+      regionStart = regionEnd = null;
+      $("syncHint").textContent = "已选 (" + region[0] + "," + region[1] + ")–(" +
+        region[2] + "," + region[3] + ")，正在刷新这块…";
+      command("scan_region", { region });
+      return;
+    }
+    // 普通拖动：让模拟器镜头跟到网页停下来的位置，同时把新画面拼进来
+    syncSimulator();
   }
   window.addEventListener("pointerup", finishPan);
   board.onpointercancel = finishPan;
@@ -632,7 +1131,8 @@
       const title = document.createElement("span");
       title.textContent =
         kind === "build" ? job.name + ("base" in job ? " · " + job.base + " → " + (job.base + 1) + " 级" : " · 升一级") :
-        kind === "drill" ? job.army + " · 练 " + job.count + " 个兵" :
+        kind === "drill" ? job.army + " · " + (job.slot ? "第 " + job.slot + " 个兵" : "自动选兵")
+          + " · 练 " + job.count + " 个" :
         job.army + " · 第 " + job.slot + " 格 · 剩余 " + job.count + " 名" + (job.verify ? " · 待核对" : "");
       const actions = document.createElement("span");
       actions.className = "actions";
@@ -652,10 +1152,10 @@
       return row;
     }));
   }
-  // 顺序和游戏顶部一致：粮木石，然后石头下方竖排的 铁、卷轴、钉子
+  // 顺序和游戏顶部一致：粮木石，然后石头下方竖排的 经验书、铁、卷轴、钉子
   const RES_NAMES = { grain: "粮食", wood: "木头", stone: "石头",
-    iron: "铁", scroll: "卷轴", nail: "钉子", book: "经验书" };
-  const RES_ORDER = ["grain", "wood", "stone", "iron", "scroll", "nail"];
+    book: "经验书", iron: "铁", scroll: "卷轴", nail: "钉子" };
+  const RES_ORDER = ["grain", "wood", "stone", "book", "iron", "scroll", "nail"];
   function renderResources(res) {
     const row = $("resRow");
     // 即使还没读到，也把六格占位画出来，形状固定、不跳动
@@ -667,7 +1167,7 @@
     const signature = JSON.stringify([fill, amounts, res && res.points]);
     if (row.dataset.sig === signature) return;
     row.dataset.sig = signature;
-    const STOCK = ["iron", "scroll", "nail"];
+    const STOCK = ["book", "iron", "scroll", "nail"];
     row.replaceChildren(...RES_ORDER.map(name => {
       const ratio = fill[name];
       const value = amounts[name];
@@ -764,7 +1264,7 @@
       const eta = document.createElement("span");
       eta.className = "army-eta";
       eta.textContent = a.timer || (soldiers + "/" + MAX_PER_ARMY);
-      row3.append(st, eta);   // 兵种不再用文字猜，直接看下面的头像图
+      row3.append(st, eta);
 
       li.append(top, row2, row3);
       // 士兵头像条：直接看图，比猜兵种名可靠
@@ -775,6 +1275,186 @@
         img.src = "data:image/png;base64," + a.units;
         li.append(img);
       }
+      return li;
+    }));
+  }
+  // 多条路线：每条一张卡（暂停/继续、删除、切过去看格子）
+  function renderRoutes(routes, currentPath, currentIndex) {
+    const list = $("routeCards");
+    const steps = $("routeSteps");
+    $("routeCount").textContent = routes.length ? routes.length + " 条" : "";
+    const sig = JSON.stringify(routes);
+    if (list.dataset.sig !== sig) {
+      list.dataset.sig = sig;
+      if (!routes.length) {
+        const li = document.createElement("li");
+        li.className = "muted";
+        li.textContent = "还没有提交过路线 —— 下面规划一条试试。";
+        list.replaceChildren(li);
+      } else {
+        list.replaceChildren(...routes.map((r, i) => {
+          const li = document.createElement("li");
+          li.className = "route-card" + (r.current ? " current" : "") + (r.active ? "" : " paused");
+          const head = document.createElement("div");
+          head.className = "route-head";
+          const nm = document.createElement("b");
+          nm.textContent = "#" + (i + 1);
+          const done = r.index >= r.count;
+          const badge = document.createElement("span");
+          badge.className = "route-badge" + (done ? "" : r.active ? " on" : " wait");
+          badge.textContent = done ? "已走完" : r.active ? "执行中" : "已暂停";
+          head.append(nm, badge);
+          const prog = document.createElement("span");
+          prog.className = "route-progress";
+          prog.textContent = r.index + " / " + r.count
+            + (r.head ? " · 队首 (" + r.head[0] + "," + r.head[1] + ")" : "");
+          head.append(prog);
+          const acts = document.createElement("div");
+          acts.className = "actions";
+          const view = document.createElement("button");
+          view.textContent = r.current ? "正在查看" : "看这条";
+          view.disabled = r.current;
+          view.onclick = () => command("select_route", { key: r.key });
+          const toggle = document.createElement("button");
+          toggle.textContent = r.active ? "暂停" : (done ? "已完成" : "继续");
+          toggle.disabled = done;
+          toggle.onclick = () => command(r.active ? "pause" : "resume", { key: r.key });
+          const del = document.createElement("button");
+          del.textContent = "删除";
+          del.onclick = () => command("remove_route", { key: r.key });
+          acts.append(view, toggle, del);
+          li.append(head, acts);
+          return li;
+        }));
+      }
+    }
+    const cur = routes.find(r => r.current);
+    if (!cur) { steps.replaceChildren(); return; }
+    steps.replaceChildren(...(currentPath || []).map((p, i) => {
+      const li = document.createElement("li");
+      li.textContent = position(p);
+      if (i < currentIndex) { li.className = "done"; li.textContent += " · 已占领"; }
+      else if (i === currentIndex && cur.active) { li.className = "current"; li.textContent += " · 当前目标"; }
+      return li;
+    }));
+  }
+  function renderSquads(squads, active, routeKey) {
+    const list = $("squadList");
+    const sig = JSON.stringify([squads || [], active || "", routeKey || ""]);
+    if (list.dataset.sig === sig) return;
+    list.dataset.sig = sig;
+    $("squadHint").textContent = routeKey ? "当前路线 " + routeKey : "";
+    // 「绑定路线」下拉：当前这条路线 + 不绑定
+    const routeSelect = $("squadRoute");
+    const options = [["", "不绑定（所有路线都能用）"]];
+    if (routeKey) options.push([routeKey, "当前路线"]);
+    const routeSig = JSON.stringify(options);
+    if (routeSelect.dataset.options !== routeSig) {
+      routeSelect.dataset.options = routeSig;
+      routeSelect.replaceChildren(...options.map(([v, t]) => new Option(t, v)));
+    }
+    if (!squads || !squads.length) {
+      const li = document.createElement("li");
+      li.className = "muted";
+      li.textContent = "还没有小队 —— 现在开荒会自动挑编队";
+      list.replaceChildren(li);
+    } else {
+      list.replaceChildren(...squads.map((s, i) => {
+      const li = document.createElement("li");
+      li.className = "squad" + (s.name === active ? " active" : "") +
+        (s.route && s.route === routeKey ? " for-this-route" : "");
+      const head = document.createElement("div");
+      head.className = "squad-head";
+      const nm = document.createElement("b");
+      nm.textContent = s.name;
+      head.append(nm);
+      if (s.route) {
+        const tag = document.createElement("span");
+        tag.className = "squad-route" + (s.route === routeKey ? " here" : "");
+        tag.textContent = s.route === routeKey ? "这条路线" : "路线 " + s.route;
+        head.append(tag);
+      }
+      const members = document.createElement("p");
+      members.className = "squad-members";
+      members.textContent = (s.armies || []).join("、");
+      const acts = document.createElement("div");
+      acts.className = "actions";
+      const use = document.createElement("button");
+      use.textContent = s.name === active ? "当前使用" : "用这个小队";
+      use.disabled = s.name === active;
+      use.onclick = () => opsCommand("set_squad", null, { name: s.name });
+      const bind = document.createElement("button");
+      bind.textContent = s.route ? "改绑当前路线" : "绑定当前路线";
+      bind.disabled = !routeKey || s.route === routeKey;
+      bind.onclick = () => {
+        const next = squads.map(x => ({ ...x }));
+        next[i].route = routeKey;
+        opsCommand("save_squads", null, { squads: next, active });
+      };
+      const del = document.createElement("button");
+      del.textContent = "删除";
+      del.onclick = () => {
+        const next = squads.slice();
+        next.splice(i, 1);
+        opsCommand("save_squads", null, { squads: next, active });
+      };
+      acts.append(use, bind, del);
+      li.append(head, members, acts);
+      return li;
+    }));
+    }
+    // 成员候选取自已读到的编队列表（各队带状态，方便挑）
+    const facts = (state?.operations || {}).facts || {};
+    const armies = Object.entries(facts.armies ?? {});
+    const chosen = [...$("squadArmies").selectedOptions].map(o => o.value);
+    replaceOptions($("squadArmies"), armies.length ? armies.map(([name, a]) =>
+      [name, name + (a.state ? " · " + a.state : "")]) : []);
+    for (const opt of $("squadArmies").options) opt.selected = chosen.includes(opt.value);
+  }
+  const TUNE_CN = {
+    distance_penalty: "距离惩罚", distance_free_rings: "免惩罚圈数", max_difficulty: "难度上限",
+    stuck_limit: "卡格阈值", retry_hours: "重试间隔(小时)", max_candidates_per_round: "每轮尝试格数",
+    recall_hp: "召回血量", min_attack_hp: "出战最低血量", max_per_army: "每队人数上限",
+    resource_wait_seconds: "资源等待(秒)", learn_min_try: "学习最少样本", learn_stale_hours: "学习过期(小时)"
+  };
+  function renderTune(profile, changed) {
+    const box = $("tuneBox");
+    if (!profile || !profile["主城等级"]) {
+      box.hidden = true;
+      return;
+    }
+    box.hidden = false;
+    const count = (changed || []).length;
+    $("tuneProfile").textContent = "主城 " + profile["主城等级"] + " 级"
+      + (profile["编队数"] ? " · 编队 " + profile["编队数"] : "")
+      + (count ? " · 已按账号调整 " + count + " 项" : " · 无需调整");
+    const list = $("tuneList");
+    if (!count) {
+      list.replaceChildren();
+      return;
+    }
+    const sig = JSON.stringify(changed);
+    if (list.dataset.sig === sig) return;
+    list.dataset.sig = sig;
+    list.replaceChildren(...changed.map(text => {
+      const li = document.createElement("li");
+      const name = String(text).split("=")[0];
+      li.textContent = (TUNE_CN[name] || name) + " → " + String(text).split("=").slice(1).join("=");
+      return li;
+    }));
+  }
+  function renderSkips(skips) {
+    const list = $("skipList");
+    const sig = JSON.stringify(skips.map(s => [s.xy, s.reason]));
+    if (list.dataset.sig === sig) return;
+    list.dataset.sig = sig;
+    list.replaceChildren(...skips.map(s => {
+      const li = document.createElement("li");
+      const at = document.createElement("b");
+      at.textContent = "(" + s.xy[0] + "," + s.xy[1] + ")";
+      const why = document.createElement("span");
+      why.textContent = s.reason + (s.auto ? "（脚本自己跳的）" : "");
+      li.append(at, why);
       return li;
     }));
   }
@@ -789,10 +1469,19 @@
     const gameSlots = facts.gameRecruit;
     const stamp = facts.updated || Math.max(0, ...buildings.map(([, b]) => b.at));
     $("factsTime").textContent = ops.refreshing ? "正在读取建筑、兵营和军队面板…" : ops.refreshError ||
-      (stamp ? "最近读取 " + new Date(stamp * 1000).toLocaleTimeString() : "等待读取游戏状态");
+      (facts.buildingsCachedAt
+        ? "建筑等级为缓存（" + new Date(facts.buildingsCachedAt * 1000).toLocaleString() +
+          "），升级时会自动核对"
+        : (stamp ? "最近读取 " + new Date(stamp * 1000).toLocaleTimeString() : "等待读取游戏状态"));
     $("gameBuild").textContent = "游戏施工队列 · " + (buildSlots ? "识别到 " + buildSlots[0] + " 项施工，脚本按 " + buildSlots[1] + " 个施工位运行" : "等待读取");
     $("gameRecruit").textContent = "游戏招募队列 · " + (gameSlots ? gameSlots.join(" / ") : "等待读取") +
       (facts.armySlots ? " · 编队 " + facts.armySlots.join(" / ") : "");
+    // 编队状态是「刚读的」还是「一分半前的」，要写清楚，不然看着像不同步
+    const armyAt = Number(facts.armyAt || 0);
+    $("armyFresh").textContent = armyAt
+      ? "编队状态读取于 " + Math.max(0, Math.round(Date.now() / 1000 - armyAt)) + " 秒前（每 "
+        + ((ops.facts.snapshotSeconds || 20)) + " 秒自动刷新）"
+      : "还没成功读过编队状态（点右上角「刷新游戏状态」）";
     textItems($("buildFacts"), buildings.length ? buildings.map(([name, b]) => name + " · " + b.level + " 级" + (b.busy ? " · 施工中" : "")) : ["尚未读到建筑等级"]);
     renderArmies(armies);
     const names = ["主城", ...ops.buildingNames.filter(name => name !== "主城")];
@@ -819,6 +1508,9 @@
       }
     }
     renderResources(facts.resources);
+    renderTune(facts.autotune, facts.autotuneChanged);
+    renderSquads(ops.squads || [], ops.activeSquad, state?.routeKey || "");
+    if (!$("squadName").value) $("squadName").value = "小队" + ((ops.squads || []).length + 1);
     $("refreshOps").disabled = busy || !online || !state.home || ops.refreshing;
     $("addBuild").querySelector("button").disabled = busy || !online || !state.home;
     $("addRecruit").querySelector("button").disabled = busy || !online || !armies.length;
@@ -838,7 +1530,7 @@
     if (!confirm("确定停止脚本？停止后需要重新双击「启动九万亩.bat」才能再运行。")) return;
     try { await fetch("stop", { method: "POST" }); } catch (e) { /* 进程退出会断连接，正常 */ }
     document.body.innerHTML = '<main><h1>脚本已停止</h1><p style="color:#98A2B3;margin-top:12px">' +
-      '要重新开始，双击项目目录里的「启动九万亩.bat」。<br>网页地址固定为 http://127.0.0.1:8765/jwm/</p></main>';
+      '要重新开始，双击桌面的「九万亩」图标。</p></main>';
   };
   $("addBuild").onsubmit = e => {
     e.preventDefault();
@@ -848,13 +1540,44 @@
     e.preventDefault();
     opsCommand("add", "recruit", { army: $("army").value, slot: Number($("slot").value), count: $("soldiers").valueAsNumber });
   };
+  $("addSquad").onsubmit = e => {
+    e.preventDefault();
+    const sel = [...$("squadArmies").selectedOptions].map(o => o.value);
+    if (!sel.length) { $("squadMessage").textContent = "至少选一支编队。"; return; }
+    const name = $("squadName").value.trim();
+    if (!name) { $("squadMessage").textContent = "给小队起个名字。"; return; }
+    const route = $("squadRoute")?.value || "";
+    const squads = (state.operations.squads || []).concat([{ name, armies: sel, on: true, route }]);
+    opsCommand("save_squads", null, { squads, active: name });
+    $("squadMessage").textContent = "已保存小队「" + name + "」"
+      + (route ? "，绑定到当前路线。" : "，未绑定路线（所有路线可用）。");
+    $("squadName").value = "";
+  };
   $("addDrill").onsubmit = e => {
     e.preventDefault();
-    opsCommand("add", "drill", { army: $("drillArmy").value, count: $("drillCountInput").valueAsNumber });
+    opsCommand("add", "drill", {
+      army: $("drillArmy").value,
+      slot: Number($("drillSlot").value),
+      count: $("drillCountInput").valueAsNumber,
+    });
   };
   function scheduleSync(delay) {
     clearTimeout(syncTimer);
     syncTimer = setTimeout(sync, delay);
+  }
+  async function consoleRunning() {
+    // 问控制台进程是否还活着：活着但脚本网页还没响应 = 正在启动；
+    // 只有进程真的没了才算停止。通过 /map/ 代理时同源，直接开 8766 时跨到 8765。
+    const proxied = location.pathname.startsWith("/map/");
+    const url = proxied ? "/jwm/state" : "http://127.0.0.1:8765/jwm/state";
+    try {
+      const r = await fetch(url, { cache: "no-store" });
+      if (!r.ok) return null;
+      const info = await r.json();
+      return Boolean(info.running);
+    } catch {
+      return null;
+    }
   }
   async function sync() {
     if (!busy) {
@@ -874,10 +1597,25 @@
           }
           state = data;
           online = true;
+          starting = false;
+          offlineNotified = false;
+          failureSince = 0;
           if (changed) render();
         }
       } catch {
-        if (online && generation === write) {
+        // 脚本停了时，控制台代理会返回非 JSON。以前这里只在「曾经在线」时才
+        // 重绘，于是新开页面会永远停在地图占位和「等待脚本连接」。现在无论
+        // 第一次还是中途掉线都明确显示离线状态，并区分「启动中」和「已停止」。
+        const running = await consoleRunning();
+        if (generation !== write) return;
+        if (!failureSince) failureSince = Date.now();
+        // 控制台也问不到时（例如直接打开 8766、控制台还没启动），
+        // 先按「启动中」显示一会儿，避免初始化阶段就吓人地写「没在运行」。
+        const unknownButRecent = running === null && Date.now() - failureSince < 45000;
+        const nextStarting = running === true || unknownButRecent;
+        if (!offlineNotified || nextStarting !== starting) {
+          offlineNotified = true;
+          starting = nextStarting;
           online = false;
           render();
         }
