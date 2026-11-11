@@ -16,3 +16,9 @@ _tmp/
 *.tmp
 *.bak
 config.yaml.bak
+
+# 运行期残留：脚本每次刷新会建一个 tmpXXXXXXXX 目录放中间快照，跑完不删
+tmp*/
+
+# 前端设计检查工具的本地状态（每个开发者自己生成）
+.taste-skill/
