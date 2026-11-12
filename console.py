@@ -8,6 +8,7 @@
 用法：双击 控制台.bat（或 python console.py），然后浏览器打开固定地址。
 """
 import json
+import pathlib
 import logging
 import os
 import socket
@@ -25,6 +26,13 @@ PREFIX = "/jwm/"
 # 开荒地图页的代理前缀：/map/ → 转发到脚本自己的 8766/jwm/
 MAPPFX = "/map/"
 PAGE = HERE / "jwm" / "console.html"
+# 控制台页面用到的静态资源（路径 → 文件 + MIME）。只列白名单，不做通用静态服务。
+_STATIC = {
+    PREFIX + "ascii-sharks.bundle.js": (
+        HERE / "jwm" / "ascii-sharks.bundle.js",
+        "text/javascript; charset=utf-8",
+    ),
+}
 LOG = HERE / "logs" / "console.log"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s",
@@ -173,20 +181,31 @@ class Handler(BaseHTTPRequestHandler):
         if not self._local():
             self._reply(404, "text/plain", b"")
             return
-        if self.path in (PREFIX, PREFIX + "index.html"):
+        # 忽略查询串：「?v=17」这种只是拿来击穿浏览器缓存的，路由照旧。
+        # 以前带 ?v= 会落到 404，于是页面改了也只能靠用户手动清缓存。
+        path = self.path.split("?", 1)[0]
+        if path in (PREFIX, PREFIX + "index.html"):
             try:
                 self._reply(200, "text/html; charset=utf-8", PAGE.read_bytes())
             except OSError:
                 self._reply(500, "text/plain; charset=utf-8", "缺少 console.html".encode())
-        elif self.path == PREFIX + "state":
+        elif path in _STATIC:
+            # 控制台的静态资源（目前只有 ascii-sharks 的画布引擎）。
+            # 白名单列出，避免变成通用文件服务器。
+            try:
+                body, ctype = _STATIC[path]
+                self._reply(200, ctype, pathlib.Path(body).read_bytes())
+            except OSError:
+                self._reply(404, "text/plain; charset=utf-8", b"missing asset")
+        elif path == PREFIX + "state":
             _state["seen"] = time.time()
             self._reply(200, "application/json; charset=utf-8",
                         json.dumps(_snapshot(), ensure_ascii=False).encode())
-        elif self.path.startswith(MAPPFX):
+        elif path.startswith(MAPPFX):
             # 开荒地图页通过 /map/ 前缀整体转发到脚本的 8766。
             # 页面里所有相对请求（state / map/xx / command）都基于 /map/，
             # 所以这里把它们原样拼接回去，保证页面只认 8765 一个地址。
-            self._proxy_script(self.path[len(MAPPFX):])
+            self._proxy_script(path[len(MAPPFX):])
         else:
             self._reply(404, "text/plain", b"")
 

@@ -3,81 +3,227 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-store, must-revalidate">
 <title>九万亩 · 控制台</title>
+<meta name="description" content="九万亩脚本的控制台：启停脚本、查看运行状态与实时日志。">
 <style>
+  /* ============================================================
+     与开荒地图页同一套语言（DESIGN-claude.md）：
+     暖米色画布、衬线标题、珊瑚主色、深色产品面。
+     这里的「深色面」给海洋窗和日志窗用。
+     ============================================================ */
   :root {
-    color-scheme: dark;
-    --bg:#0B0D12; --bg-soft:#10141B;
-    --surface:#151A22; --surface-2:#1A2029; --surface-3:#222A36; --surface-4:#2A3441;
-    --stroke:#232B37; --stroke-hi:#354052;
-    --ink:#EDF1F7; --ink-2:#9AA6B8; --ink-3:#626E80;
-    --primary:#4C8DFF; --primary-soft:#4C8DFF1F;
-    --green:#3DDC97; --amber:#F2B45A; --red:#F16A76;
-    --purple:#A78BFA; --cyan:#57D3E8;
-    --shadow: 0 1px 0 #FFFFFF08 inset, 0 14px 32px -20px #000000CC;
+    color-scheme: light;
+
+    --primary: #cc785c;
+    --primary-active: #a9583e;
+    --primary-disabled: #e6dfd8;
+
+    --ink: #141413;
+    --body: #3d3d3a;
+    --body-strong: #252523;
+    --muted: #6c6a64;
+    --muted-soft: #8e8b82;
+
+    --canvas: #faf9f5;
+    --surface-soft: #f5f0e8;
+    --surface-card: #efe9de;
+    --surface-dark: #181715;
+    --surface-dark-elevated: #252320;
+    --on-dark: #faf9f5;
+    --on-dark-soft: #a09d96;
+
+    --hairline: #e6dfd8;
+    --hairline-soft: #ebe6df;
+
+    --success: #5db872;
+    --warning: #d4a017;
+    --error: #c64545;
+
+    --s-1: 4px;  --s-2: 8px;  --s-3: 12px; --s-4: 16px;
+    --s-5: 24px; --s-6: 32px; --s-7: 48px;
+
+    --r-sm: 6px; --r-md: 8px; --r-lg: 12px; --r-xl: 16px; --r-full: 9999px;
+
+    --font-display: "Cormorant Garamond", "Tiempos Headline", "Songti SC", "SimSun", Georgia, serif;
+    --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+    --font-mono: "JetBrains Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+
+    --fast: 130ms;
+    --ease: cubic-bezier(.22, .61, .36, 1);
   }
-  * { box-sizing:border-box; }
-  body { margin:0; background:
-      radial-gradient(1000px 480px at 10% -10%, #1D2A44 0%, transparent 60%),
-      radial-gradient(900px 440px at 100% 0%, #16283A 0%, transparent 56%),
-      var(--bg);
-    background-attachment:fixed; color:var(--ink);
-    font:14px/1.6 "Microsoft YaHei UI","Microsoft YaHei","PingFang SC",sans-serif;
-    -webkit-font-smoothing:antialiased; }
-  main { max-width:min(96vw,1180px); margin:auto; padding:28px 26px 52px; }
-  header { display:flex; justify-content:space-between; align-items:baseline; gap:14px;
-    padding-bottom:16px; margin-bottom:20px; border-bottom:1px solid var(--stroke); }
-  h1 { margin:0; font-size:25px; font-weight:650; letter-spacing:.2px;
-    background:linear-gradient(92deg,#FFFFFF 0%,#BBD3FF 55%,#8FB6FF 100%);
-    -webkit-background-clip:text; background-clip:text; color:transparent; }
-  h2 { margin:0 0 10px; font-size:13px; font-weight:650; letter-spacing:.5px; }
-  p { margin:0; }
-  .muted { color:var(--ink-2); font-size:12.5px; }
-  .panel { background:linear-gradient(180deg,var(--surface) 0%,var(--bg-soft) 100%);
-    border:1px solid var(--stroke); border-radius:16px; padding:18px; box-shadow:var(--shadow); }
-  .grid { display:grid; gap:16px; }
-  .row { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
-  .dot { width:10px; height:10px; border-radius:50%; background:var(--ink-3); transition:background .2s; }
-  .dot.on { background:var(--green); box-shadow:0 0 12px var(--green); animation:pulse 1.8s ease-in-out infinite; }
-  .dot.off { background:var(--ink-3); }
-  @keyframes pulse { 0%,100%{opacity:1;transform:scale(1);} 50%{opacity:.42;transform:scale(.82);} }
-  .status { font-size:16px; font-weight:650; letter-spacing:.2px; }
-  .status.on { color:var(--green); }
-  .status.off { color:var(--ink-3); }
-  button { background:linear-gradient(180deg,var(--surface-3) 0%,var(--surface-2) 100%);
-    color:var(--ink); border:1px solid var(--stroke-hi);
-    border-radius:10px; padding:9px 20px; font:inherit; font-size:13.5px; font-weight:600; cursor:pointer;
-    transition:background .16s,border-color .16s,transform .08s; }
-  button:hover:not(:disabled) { background:linear-gradient(180deg,var(--surface-4) 0%,var(--surface-3) 100%);
-    border-color:#445069; }
-  button:active:not(:disabled) { transform:translateY(1px); }
-  button:disabled { color:var(--ink-3); background:var(--surface-2); border-color:var(--stroke); cursor:default; }
-  button.primary { background:linear-gradient(180deg,#4FE7A6 0%,var(--green) 100%);
-    border-color:transparent; color:#05130C; box-shadow:0 8px 20px -12px #3DDC97CC; }
-  button.primary:hover:not(:disabled) { background:linear-gradient(180deg,#63F2B7 0%,#43E6A3 100%); }
-  button.primary:disabled { background:#1B2A24; color:#4A6558; box-shadow:none; }
-  button.danger { background:transparent; color:var(--red); border-color:#4A2A30; }
-  button.danger:hover:not(:disabled) { background:#2A1A1E; border-color:#6B3A42; }
-  button.danger:disabled { color:var(--ink-3); border-color:var(--stroke); background:transparent; }
-  pre { margin:0; padding:13px 15px; background:#0D1117; border:1px solid var(--stroke);
-    border-radius:12px; font:12px/1.65 "Cascadia Mono",Consolas,monospace; color:#A9B6C9;
-    max-height:430px; overflow:auto; white-space:pre-wrap; word-break:break-all; }
-  .kv { display:flex; gap:18px; flex-wrap:wrap; color:var(--ink-2); font-size:12.5px;
-    font-variant-numeric:tabular-nums; }
-  a.link { color:#8FB8FF; text-decoration:none; font-weight:600; }
-  a.link:hover { text-decoration:underline; }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    /* 整页就是一片深海，鲨鱼在底下游，内容浮在上面 */
+    background: #0d0c0b;
+    color: var(--body);
+    font: 400 15px/1.55 var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    min-height: 100vh;
+  }
+  /* 全屏固定的画布：滚动时鲨鱼还在（不是页面上的一条横带） */
+  #ocean {
+    position: fixed; inset: 0;
+    width: 100%; height: 100%;
+    display: block;
+    z-index: 0;
+    font-family: var(--font-mono);
+  }
+  #ocean.hidden-bg { display: none; }
+  main {
+    position: relative; z-index: 1;
+    max-width: 1080px; margin: 0 auto;
+    padding: var(--s-6) var(--s-5) var(--s-7);
+  }
+
+  h1, h2 {
+    font-family: var(--font-display);
+    font-weight: 400;
+    color: var(--ink);
+    margin: 0;
+  }
+  h1 { font-size: 36px; line-height: 1.15; letter-spacing: -.5px; color: var(--on-dark); }
+  h2 { font-size: 22px; line-height: 1.2; letter-spacing: -.3px; margin-bottom: var(--s-3); }
+  p { margin: 0; }
+
+  :where(button, a, [tabindex]):focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
+  }
+
+  /* ---------- 页头 ---------- */
+  header {
+    display: flex; justify-content: space-between; align-items: baseline; gap: var(--s-4);
+    padding-bottom: var(--s-5); margin-bottom: var(--s-5);
+    border-bottom: 1px solid #faf9f51f;
+  }
+  #url { color: var(--on-dark-soft); font-size: 14px; font-variant-numeric: tabular-nums; }
+
+  /* ---------- 页脚署名：压在海洋上的一行小字 ---------- */
+  .credit {
+    position: relative; z-index: 1;
+    max-width: 1080px; margin: 0 auto;
+    padding: 0 var(--s-5) var(--s-5);
+    color: var(--on-dark-soft);
+    font: 500 11px/1.4 var(--font-sans);
+    letter-spacing: 1.3px; text-transform: uppercase;
+    text-align: right;
+  }
+  .credit a { color: var(--on-dark-soft); text-decoration: none; }
+  .credit a:hover { color: var(--on-dark); text-decoration: underline; text-underline-offset: 2px; }
+
+  /* ---------- 卡片 ---------- */
+  .grid { display: grid; gap: var(--s-4); }
+  .panel {
+    background: var(--canvas);
+    border: 1px solid var(--hairline);
+    border-radius: var(--r-lg);
+    padding: var(--s-6);
+    box-shadow: 0 24px 48px -32px #000000E6;
+  }
+  .panel.soft { background: var(--surface-soft); border-color: transparent; }
+
+  .row { display: flex; align-items: center; gap: var(--s-3); flex-wrap: wrap; }
+
+  /* ---------- 状态 ---------- */
+  .dot {
+    width: 9px; height: 9px; border-radius: 50%;
+    background: var(--muted-soft);
+    transition: background var(--fast) var(--ease);
+  }
+  .dot.on { background: var(--success); box-shadow: 0 0 0 4px #5db87226; }
+  .dot.off { background: var(--muted-soft); }
+
+  .status {
+    font-family: var(--font-display);
+    font-size: 24px; font-weight: 500; letter-spacing: -.2px;
+    color: var(--ink);
+  }
+  .status.on { color: #2f7a48; }
+  .status.off { color: var(--muted); }
+
+  .kv {
+    display: flex; gap: var(--s-4); flex-wrap: wrap;
+    color: var(--muted); font-size: 14px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* ---------- 按钮 ---------- */
+  button {
+    background: var(--canvas);
+    color: var(--ink);
+    border: 1px solid var(--hairline);
+    border-radius: var(--r-md);
+    min-height: 40px;
+    padding: 10px var(--s-5);
+    font: 500 14px/1 var(--font-sans);
+    white-space: nowrap;
+    cursor: pointer;
+    transition: background var(--fast) var(--ease), border-color var(--fast) var(--ease), color var(--fast) var(--ease);
+  }
+  button:hover:not(:disabled) { background: var(--surface-soft); }
+  button:active:not(:disabled) { background: var(--surface-card); }
+  button:disabled { color: var(--muted-soft); background: var(--surface-soft); border-color: var(--hairline-soft); cursor: default; }
+  /* 主操作：全页唯一的珊瑚填充 */
+  button.primary { background: var(--primary); border-color: var(--primary); color: #ffffff; }
+  button.primary:hover:not(:disabled) { background: var(--primary-active); border-color: var(--primary-active); }
+  button.primary:disabled { background: var(--primary-disabled); border-color: var(--primary-disabled); color: var(--muted); }
+  /* 危险操作：只描边，不填充 —— 免得和主操作抢注意力 */
+  button.danger { color: var(--error); border-color: #c6454559; background: var(--canvas); }
+  button.danger:hover:not(:disabled) { background: #c645450f; border-color: var(--error); }
+  button.danger:disabled { color: var(--muted-soft); border-color: var(--hairline-soft); background: var(--canvas); }
+
+  a.link {
+    color: var(--primary); text-decoration: none; font-weight: 500;
+  }
+  a.link:hover { color: var(--primary-active); text-decoration: underline; text-underline-offset: 2px; }
+
+  .hint { color: var(--muted); font-size: 14px; margin-top: var(--s-4); line-height: 1.65; }
+
+  /* ---------- 日志窗：深色代码面 ---------- */
+  .log-card { background: var(--surface-dark); border-color: transparent; }
+  .log-card h2 { color: var(--on-dark); }
+  .log-card .meta { color: var(--on-dark-soft); font-size: 11px; letter-spacing: 1.4px; text-transform: uppercase; }
+  pre {
+    margin: var(--s-3) 0 0;
+    padding: var(--s-4);
+    background: #101010;
+    border: 1px solid #ffffff12;
+    border-radius: var(--r-md);
+    font: 400 13px/1.7 var(--font-mono);
+    color: #b9b4aa;
+    max-height: 420px;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+
+  @media (max-width: 640px) {
+    main { padding: var(--s-5) var(--s-4) var(--s-6); }
+    h1 { font-size: 28px; }
+    header { flex-direction: column; align-items: start; gap: var(--s-2); }
+    .ocean { height: 180px; }
+    .panel { padding: var(--s-4); }
+    button { width: 100%; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; animation: none !important; }
+  }
 </style>
 </head>
 <body>
+<canvas id="ocean" aria-hidden="true"></canvas>
 <main>
   <header>
     <h1>九万亩 · 控制台</h1>
-    <p class="muted" id="url"></p>
+    <p id="url"></p>
   </header>
 
   <div class="grid">
     <section class="panel">
-      <div class="row" style="margin-bottom:14px">
+      <div class="row" style="margin-bottom:16px">
         <span class="dot off" id="dot"></span>
         <span class="status off" id="statusText">未运行</span>
         <span class="kv" id="meta"></span>
@@ -87,17 +233,23 @@
         <button class="danger" id="stopBtn" disabled>停止脚本</button>
         <a class="link" id="openApp" href="#" target="_blank" style="margin-left:auto">打开开荒地图 →</a>
       </div>
-      <p class="muted" style="margin-top:12px">
+      <p class="hint">
         启动后脚本会接管模拟器。不玩的时候点「停止脚本」，后台就只剩这个控制台，不占 CPU、不截图。
       </p>
     </section>
 
-    <section class="panel">
+    <section class="panel log-card">
       <h2>运行日志</h2>
+      <p class="meta">实时 · 每 2 秒刷新</p>
       <pre id="log">等待启动…</pre>
     </section>
   </div>
 </main>
+<p class="credit">
+  ascii sharks · <a href="https://github.com/stackedlol/ascii-sharks" target="_blank" rel="noopener">stackedlol/ascii-sharks</a> · MIT
+</p>
+
+<script src="ascii-sharks.bundle.js"></script>
 <script>
   const $ = id => document.getElementById(id);
   let busy = false;
@@ -149,6 +301,26 @@
   $("url").textContent = location.origin + location.pathname;
   poll();
   setInterval(poll, 2000);
+
+  /* ---------- 海洋：ascii-sharks 的画布引擎 ---------- */
+  (function startOcean() {
+    const canvas = $("ocean");
+    const Engine = window.AsciiSharks && window.AsciiSharks.OceanEngine;
+    // 引擎自己处理 prefers-reduced-motion 与「离屏暂停」；没加载上就把画布藏掉，
+    // 露出下面的深色底，不会是一块白。
+    if (!Engine) { canvas.classList.add("hidden-bg"); return; }
+    try {
+      new Engine(canvas, [
+        { kind: "classic", size: 1 },
+        { kind: "hammerhead", size: 0.82 },
+        { kind: "mako", size: 0.66 },
+        { kind: "thresher", size: 0.72 },
+      ]);
+    } catch (e) {
+      canvas.classList.add("hidden-bg");
+      console.warn("ascii-sharks 启动失败：", e);
+    }
+  })();
 </script>
 </body>
 </html>
