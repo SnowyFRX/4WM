@@ -120,16 +120,17 @@
      rgba 的 0.70 是量过的 —— 米色叠在 #0d0c0b 上约等效 #b3b2ae，
      正文 #141413 对比度仍有 ~7:1，高于 AA 的 4.5。 */
   .panel {
-    /* 不做背景模糊（ASCII 点阵一糊就是脏斑），也不留硬边：
-       和日志区同一套做法 —— 上下渐隐的一块浅色，看着只是「这块纸更白一点」。
-       没有边框、没有圆角、没有投影，所以整页没有一个直角框。 */
-    background: linear-gradient(180deg,
-      rgba(250, 248, 242, 0) 0%,
-      rgba(255, 253, 247, .62) 7%,
-      rgba(255, 253, 247, .62) 93%,
-      rgba(250, 248, 242, 0) 100%);
+    /* 圆角 + 四周渐隐：形状是有圆角的，但颜色往四边淡到没有，
+       所以看不到边框线，只看到一块「光」。
+       不做背景模糊 —— ASCII 点阵一糊就是脏斑。 */
+    background: radial-gradient(112% 126% at 50% 50%,
+      rgba(255, 253, 247, .78) 0%,
+      rgba(255, 253, 247, .70) 55%,
+      rgba(255, 253, 247, .40) 80%,
+      rgba(255, 253, 247, .10) 94%,
+      rgba(255, 253, 247, 0) 100%);
     border: 0;
-    border-radius: 0;
+    border-radius: var(--r-xl);
     box-shadow: none;
     padding: var(--s-6) var(--s-5);
   }
@@ -196,19 +197,12 @@
 
   /* ---------- 日志窗：深色代码面 ---------- */
   /* 日志卡：整块透明 —— 没有底、没有边、没有投影，只有标题和文字浮在纸上 */
+  /* 运行日志：完全透明，只有文字浮在纸上 —— 没有底、没有边、没有投影 */
   .log-card {
-    /* 仍然不是卡片：没有边框、没有圆角、没有投影。
-       只是一块「纸被擦白了一点」的区域 —— 上下渐隐，看不出边界。
-       不这么做的话，鲨鱼游过日志就会把字压糊（ASCII 纹理和等宽文字叠一起没法读）。 */
-    background: linear-gradient(180deg,
-      rgba(250, 248, 242, 0) 0%,
-      rgba(250, 248, 242, .90) 5%,
-      rgba(250, 248, 242, .94) 92%,
-      rgba(250, 248, 242, 0) 100%);
-    border-color: transparent;
+    background: transparent;
+    border: 0;
     box-shadow: none;
-    padding-left: var(--s-3);
-    padding-right: var(--s-3);
+    padding: var(--s-5) 0 0;
   }
   .log-card h2 { color: var(--ink); }
   .log-card .meta { color: var(--muted); font-size: 11px; letter-spacing: 1.4px; text-transform: uppercase; }
@@ -224,6 +218,13 @@
     mask-image: linear-gradient(180deg, #000 calc(100% - 26px), transparent 100%);
     white-space: pre-wrap;
     word-break: break-all;
+    /* 日志区完全透明，鲨鱼会从字底下游过。
+       这里只给字本身一圈纸色光晕（不是给整块加底），
+       文字压在纹理上仍然读得出，视觉上还是纯文字浮着。 */
+    text-shadow:
+      0 0 4px rgba(244, 239, 229, .95),
+      0 0 4px rgba(244, 239, 229, .95),
+      0 0 9px rgba(244, 239, 229, .75);
   }
 
   @media (max-width: 640px) {
