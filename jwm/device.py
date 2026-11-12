@@ -93,35 +93,130 @@ def _adb_env():
 
 
 class Shell:
-    """常驻 adb shell，省掉每次启动 adb 进程的开销。"""
+    """常驻 adb shell，省掉每次启动 adb 进程的开销。
 
-    MARK = b"__JWM_END__"
+    为什么要专门一个读线程：
 
-    def __init__(self, adb_cmd, env=None):
+    以前的写法是「先 os.read 再检查超时」。os.read 在管道上没有数据时会**无限阻塞**，
+    所以只要 adb 进程活着但一个字节都不吐（连着不响应、设备卡死、命令挂住），
+    那个 15 秒超时根本轮不到执行 —— 脚本就永久停在那里，只能杀进程。
+    真机上表现为「点了停止没反应 / 整晚不动」。
+
+    现在读由后台线程负责，run() 只带着截止时间等条件变量：
+    到点一定抛 TimeoutError，不必等 adb 先说话。
+
+    每次命令用**唯一**结束标记（序号+随机数）。固定标记有个坑：
+    上一条命令超时被放弃后，它的标记迟到落进管道，下一条命令会把它当成自己的结束，
+    于是拿到上一条的输出。现在标记唯一，对不上就是不对上；超时后整个 shell 作废重建。
+    """
+
+    MARK_PREFIX = b"__JWM_END_"
+
+    def __init__(self, adb_cmd, env=None, timeout=15):
         self.p = subprocess.Popen(adb_cmd + ["shell"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                   stderr=subprocess.STDOUT, bufsize=0, env=env or _adb_env())
         self.lock = threading.Lock()
-        self.run("true")
+        self._cv = threading.Condition()
+        self._buf = bytearray()
+        self._eof = False
+        self._dead = False
+        self._seq = 0
+        self._fd = self.p.stdout.fileno()
+        self._reader = threading.Thread(target=self._pump, name="adb-shell-read", daemon=True)
+        self._reader.start()
+        try:
+            self.run("true", timeout=timeout)   # 预热；连不上就让调用方看到明确异常
+        except Exception:
+            # 构造失败也要把进程和管道收干净：adb 每次抖动都会重建一次，
+            # 漏掉的句柄会一直攒着。
+            self.close()
+            raise
 
-    def run(self, cmd, timeout=15):
-        with self.lock:
-            self.p.stdin.write((cmd + "; echo " + self.MARK.decode() + "\n").encode())
-            buf = b""
-            end = time.time() + timeout
-            while self.MARK not in buf:
-                if time.time() > end or self.p.poll() is not None:
-                    raise TimeoutError("adb shell 无响应: " + cmd)
-                chunk = os.read(self.p.stdout.fileno(), 65536)
-                if not chunk:
-                    raise ConnectionError("adb shell 断开")
-                buf += chunk
-            return buf.split(self.MARK)[0].decode("utf-8", "ignore")
+    # ---------- 内部 ----------
+    def _pump(self):
+        """后台把管道里的字节搬进缓冲区，顺便唤醒等待者。"""
+        while True:
+            try:
+                chunk = os.read(self._fd, 65536)
+            except (OSError, ValueError):
+                break
+            if not chunk:
+                break
+            with self._cv:
+                self._buf += chunk
+                self._cv.notify_all()
+        with self._cv:
+            self._eof = True
+            self._cv.notify_all()
 
-    def close(self):
+    def _fail(self, exc):
+        """出错就把整个 shell 作废：绝不留下「半截管道」给下一条命令。"""
+        self._dead = True
         try:
             self.p.kill()
         except Exception:
             pass
+        with self._cv:
+            self._cv.notify_all()
+        raise exc
+
+    @property
+    def dead(self):
+        return self._dead or self.p.poll() is not None
+
+    # ---------- 对外 ----------
+    def run(self, cmd, timeout=15):
+        if self.dead:
+            raise ConnectionError("adb shell 已失效，需要重连")
+        with self.lock:
+            self._seq += 1
+            mark = self.MARK_PREFIX + ("%d_%08x__" % (self._seq, random.getrandbits(32))).encode()
+            try:
+                self.p.stdin.write(cmd.encode("utf-8") + b"; echo " + mark + b"\n")
+                self.p.stdin.flush()
+            except (BrokenPipeError, OSError, ValueError) as e:
+                self._fail(ConnectionError("adb shell 写入失败（%s）: %s" % (e, cmd)))
+
+            deadline = time.monotonic() + timeout
+            while True:
+                with self._cv:
+                    idx = self._buf.find(mark)
+                    if idx >= 0:
+                        out = bytes(self._buf[:idx])
+                        # 标记之后如果还有字节，那是上一条命令的残留，不属于这条命令
+                        self._buf.clear()
+                        return out.decode("utf-8", "ignore")
+                    if self._eof or self.p.poll() is not None:
+                        self._fail(ConnectionError("adb shell 进程已退出: " + cmd))
+                    left = deadline - time.monotonic()
+                    if left <= 0:
+                        self._fail(TimeoutError("adb shell 无响应（%ss）: %s" % (timeout, cmd)))
+                    # 有数据就立刻回到循环顶部取，没数据才等一小会
+                    self._cv.wait(min(left, 0.02))
+
+    def close(self):
+        self._dead = True
+        try:
+            self.p.kill()
+        except Exception:
+            pass
+        try:
+            self.p.wait(timeout=1)   # 回收僵尸进程；不 wait 的话 Popen 析构会告警
+        except Exception:
+            pass
+        with self._cv:
+            self._cv.notify_all()
+        try:
+            self._reader.join(timeout=1)
+        except Exception:
+            pass
+        # 先杀进程让读线程拿到 EOF，再关管道，避免读线程在已关闭的 fd 上打转
+        for f in (self.p.stdin, self.p.stdout):
+            try:
+                if f is not None:
+                    f.close()
+            except Exception:
+                pass
 
 
 def _small(img):
@@ -176,17 +271,31 @@ class Device:
         return r.stdout
 
     def shell(self, cmd, timeout=30):
+        """执行一条 shell 命令。优先常驻 shell，坏了就重建，重建不了退回一次性调用。
+
+        顺序是有讲究的：常驻 shell 失败 → 重建一次 → 还不行再退回每次起 adb 进程。
+        每一步失败都要**先把旧 shell 作废**，不能拿半截管道继续写 —— 否则下一条命令
+        可能读到上一条的残留输出。
+        """
+        if self.sh is not None and getattr(self.sh, "dead", False):
+            self.sh.close()
+            self.sh = None
         if self.sh is not None:
             try:
                 return self.sh.run(cmd, timeout=timeout)
             except Exception as e:
                 log.warning("常驻 shell 出错（%s），重新连接", e)
-                self.sh.close()
                 try:
-                    self.sh = Shell(self._cmd([]))
-                    return self.sh.run(cmd, timeout=timeout)
+                    self.sh.close()
                 except Exception:
-                    self.sh = None
+                    pass
+                self.sh = None
+            try:
+                self.sh = Shell(self._cmd([]))
+                return self.sh.run(cmd, timeout=timeout)
+            except Exception as e:
+                log.warning("重建常驻 shell 失败（%s），退回一次性调用", e)
+                self.sh = None
         return self._run(["shell", cmd], timeout=timeout).decode("utf-8", "ignore")
 
     def _query_size(self):
