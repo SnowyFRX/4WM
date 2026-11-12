@@ -1,6 +1,7 @@
 """本机网页和开荒队列。只有脚本主线程操作模拟器。"""
 import json
 import logging
+import os
 import secrets
 import threading
 import time
@@ -12,12 +13,106 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 PAGE = Path(__file__).with_name("route_map.html")
-CACHE = Path(__file__).resolve().parent.parent / "data" / "map_cache.json"
-ROUTE_FILE = Path(__file__).resolve().parent.parent / "data" / "route.json"
+DATA = Path(__file__).resolve().parent.parent / "data"
+CACHE = DATA / "map_cache.json"
+ROUTE_FILE = DATA / "route.json"
+CHILD_URL_FILE = DATA / "web_child_url.txt"
 CACHE_MAX_AGE = 7 * 24 * 3600  # 缓存最长留一周（领地会变，太旧就没意义）
 MAX_FRAMES = 28
 SCAN_RADIUS = 48
 PRODUCTION = {1: 1, 2: 4, 3: 7, 4: 10, 5: 14}  # 资源地每小时产量；荒地按 3（1粮+1木+1石）
+
+
+def read_child_url(path=None):
+    """读脚本子服务**实际**监听在哪个端口。
+
+    子服务端口是会退让的：8766 被占就试 8767、8768，最后才要随机端口。
+    控制台如果写死一个端口去转发，总有一天对不上 —— 表现就是「脚本明明在跑，
+    网页却说没运行」。所以以进程自己写下的这份文件为准。
+
+    文件里带 pid，用来认出「上一次运行留下的」：pid 对不上就当没有。
+
+    返回 {"url", "port", "pid", "at"}；读不到或内容不合法返回 None。
+    """
+    p = Path(path) if path is not None else CHILD_URL_FILE
+    try:
+        text = p.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if not text:
+        return None
+    try:
+        data = json.loads(text)
+    except ValueError:
+        # 兼容旧格式：整个文件只有一行地址
+        first = text.splitlines()[0].strip()
+        if not first.startswith("http"):
+            return None
+        data = {"url": first}
+    if not isinstance(data, dict):
+        return None
+    url = str(data.get("url") or "")
+    if not (url.startswith("http://127.0.0.1:") or url.startswith("http://localhost:")):
+        return None
+    port = data.get("port")
+    if port is None:
+        try:
+            port = int(url.split("//", 1)[1].split("/", 1)[0].rsplit(":", 1)[1])
+        except (IndexError, ValueError):
+            return None
+    try:
+        port = int(port)
+    except (TypeError, ValueError):
+        return None
+    pid = data.get("pid")
+    try:
+        pid = int(pid) if pid is not None else None
+    except (TypeError, ValueError):
+        pid = None
+    return {"url": url if url.endswith("/") else url + "/", "port": port,
+            "pid": pid, "at": data.get("at")}
+
+
+def announce_child_url(url, port, path=None, pid=None):
+    """把实际监听地址写下来给控制台解析。写失败不影响服务本身。"""
+    p = Path(path) if path is not None else CHILD_URL_FILE
+    payload = {"url": url, "port": int(port),
+               "pid": int(pid if pid is not None else os.getpid()), "at": time.time()}
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_name(p.name + ".tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        # 先写临时文件再替换：控制台可能正好在读，不能让它读到半个 JSON
+        os.replace(tmp, p)
+        return True
+    except OSError:
+        return False
+
+
+class ExclusiveServer(ThreadingHTTPServer):
+    """独占端口的 HTTP 服务。
+
+    ThreadingHTTPServer 默认 allow_reuse_address=1，在 Windows 上意味着
+    SO_REUSEADDR 允许**两个进程同时监听同一端口**：谁先抢到谁接请求，结果随机。
+    真机踩过一次 —— 控制台和一个残留的脚本进程都绑着 8765，浏览器请求随机落到
+    其中一个，页面于是时好时坏（「脚本在跑但转接不上」）。
+
+    关掉它，端口被占时 bind 会真正失败，调用方才能按计划退到下一个端口。
+    """
+
+    allow_reuse_address = False
+    daemon_threads = True
+
+
+def bind_local(handler, port, tries=4):
+    """在 127.0.0.1 上绑定端口；被占用就往后试，最后才要随机端口。"""
+    want = int(port or 8765)
+    for candidate in list(range(want, want + tries)) + [0]:
+        try:
+            return ExclusiveServer(("127.0.0.1", candidate), handler)
+        except OSError:
+            continue
+    raise RuntimeError("网页服务启动失败：本机端口都被占用了。")
 
 
 def adjacent(a, b):
@@ -976,16 +1071,7 @@ class RouteMap:
                 self.reply_json(200, route.snapshot())
 
         # 优先固定端口，被占用就往后试几个，实在不行才用随机端口
-        server = None
-        want = int(port or 8765)
-        for candidate in (want, want + 1, want + 2, want + 3, 0):
-            try:
-                server = ThreadingHTTPServer(("127.0.0.1", candidate), Handler)
-                break
-            except OSError:
-                continue
-        if server is None:
-            raise RuntimeError("网页服务启动失败：本机端口都被占用了。")
+        server = bind_local(Handler, port or 8765)
 
         with server:
             thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -998,8 +1084,11 @@ class RouteMap:
             # 对外唯一地址始终由 console.py 写成 8765。
             try:
                 data_dir = Path(CACHE).parent
-                name = "web_url.txt" if open_browser else "web_child_url.txt"
-                (data_dir / name).write_text(url, encoding="utf-8")
+                if open_browser:
+                    (data_dir / "web_url.txt").write_text(url, encoding="utf-8")
+                else:
+                    # 实际端口可能不是 8766（被占就会退让），写下来给控制台解析
+                    announce_child_url(url, server.server_port)
             except OSError:
                 pass
             if open_browser:

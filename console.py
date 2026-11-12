@@ -22,8 +22,11 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 PORT = 8765
+
+# 只读这个小模块的两个纯函数（解析运行文件），不会把 cv2/OCR 拖进启动器
+from jwm.route_map import ExclusiveServer, read_child_url  # noqa: E402
 PREFIX = "/jwm/"
-# 开荒地图页的代理前缀：/map/ → 转发到脚本自己的 8766/jwm/
+# 开荒地图页的代理前缀：/map/ → 转发到脚本自己的子服务（实际端口看 data/web_child_url.txt）
 MAPPFX = "/map/"
 PAGE = HERE / "jwm" / "console.html"
 # 控制台页面用到的静态资源（路径 → 文件 + MIME）。只列白名单，不做通用静态服务。
@@ -50,6 +53,27 @@ IDLE_EXIT_SECONDS = 90
 def _running():
     p = _state["proc"]
     return p is not None and p.poll() is None
+
+
+def _child_base():
+    """脚本子服务的基地址（含 /jwm/ 前缀）。
+
+    子服务端口不是固定的：run.py 从 web.child_port（默认 8766）开始找空位，
+    被占就用 8767、8768，实在不行才随机。以前这里写死 8766，一旦端口被别的
+    东西占了（上一次没退干净的进程、另一个模拟器工具…），网页就会显示
+    「脚本没在运行」，而脚本其实跑得好好的。
+
+    现在以子进程自己写下的 data/web_child_url.txt 为准；文件里的 pid 必须等于
+    当前这个子进程，否则说明是上一次运行留下的，直接忽略。
+    """
+    prefer = "http://127.0.0.1:%d/jwm/" % (PORT + 1)
+    info = read_child_url(HERE / "data" / "web_child_url.txt")
+    if not info:
+        return prefer
+    pid = _state["proc"].pid if _running() else None
+    if pid is None or info.get("pid") != pid:
+        return prefer
+    return info["url"]
 
 
 def _tail_run_log(n=40):
@@ -91,7 +115,7 @@ def _start():
             py = Path(sys.executable)
         env = dict(os.environ)
         env["PYTHONIOENCODING"] = "utf-8"
-        # 子进程自己起网页服务会抢 8765；这里让它用 8766，避免冲突
+        # 子进程自己起网页服务会抢 8765；这里让它从 8766 起另开一个，避免冲突
         env["DSH_JWM_NO_WEB"] = "1"
         logf = open(HERE / "logs" / "run_live.log", "ab")
         _state["proc"] = subprocess.Popen(
@@ -163,7 +187,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", mime)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
-        # 允许脚本自己的 8766 页面查询控制台「进程是否还活着」，
+        # 允许脚本子服务的页面查询控制台「进程是否还活着」，
         # 这样直接打开子页也能区分「启动中」和「真的没运行」。
         origin = self.headers.get("Origin", "")
         if origin.startswith("http://127.0.0.1:"):
@@ -202,7 +226,7 @@ class Handler(BaseHTTPRequestHandler):
             self._reply(200, "application/json; charset=utf-8",
                         json.dumps(_snapshot(), ensure_ascii=False).encode())
         elif path.startswith(MAPPFX):
-            # 开荒地图页通过 /map/ 前缀整体转发到脚本的 8766。
+            # 开荒地图页通过 /map/ 前缀整体转发到脚本子服务。
             # 页面里所有相对请求（state / map/xx / command）都基于 /map/，
             # 所以这里把它们原样拼接回去，保证页面只认 8765 一个地址。
             self._proxy_script(path[len(MAPPFX):])
@@ -218,7 +242,7 @@ class Handler(BaseHTTPRequestHandler):
         """
         import urllib.error
         import urllib.request
-        url = "http://127.0.0.1:8766/jwm/" + sub
+        url = _child_base() + sub
         try:
             with urllib.request.urlopen(url, timeout=10) as r:
                 body = r.read()
@@ -255,7 +279,7 @@ class Handler(BaseHTTPRequestHandler):
     def _proxy_post(self, sub, body):
         import urllib.error
         import urllib.request
-        url = "http://127.0.0.1:8766/jwm/" + sub
+        url = _child_base() + sub
         req = urllib.request.Request(url, data=body, method="POST",
                                      headers={"Content-Type": self.headers.get("Content-Type", "application/json")})
         try:
@@ -377,7 +401,10 @@ def main():
     server = None
     for port in (PORT, PORT + 1, PORT + 2, PORT + 3):
         try:
-            server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+            # 必须独占：默认 allow_reuse_address=1 在 Windows 上允许两个进程
+            # 同时监听同一端口，浏览器请求随机落到其中一个 —— 于是「脚本在跑，
+            # 网页却说没运行」。关掉它，端口真被占时才会失败并退到下一个。
+            server = ExclusiveServer(("127.0.0.1", port), Handler)
             break
         except OSError:
             continue
