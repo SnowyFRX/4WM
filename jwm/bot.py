@@ -9,6 +9,7 @@ import cv2
 import yaml
 
 from .device import Device
+from .operations import REFRESH_SECONDS
 from .state import State
 from .ui import UI
 from .vision import ROOT
@@ -93,7 +94,7 @@ class Bot:
             self._army_age = time.time()
             # 把读取时间也交给网页：状态到底是「刚刚」还是「两分钟前」要说得清
             if self.operations:
-                self.operations.observe(armyAt=self._army_age, snapshotSeconds=ttl)
+                self.operations.observe(armyAt=self._army_age, snapshotSeconds=REFRESH_SECONDS)
         except Exception as e:
             log.debug("编队状态读取失败: %s", e)
 
@@ -325,7 +326,13 @@ class Bot:
         armies = {}
         try:
             armies = self.recruit.read_armies()
-            self.operations.observe(armies=armies)
+            # 这次读取同时当「编队快照」用：时间戳跟上（以前只在练兵那边写，
+            # 练兵一停，网页上的「读取于 N 秒前」就一路涨到几百秒），
+            # 缓存也一并填好，army_snapshot() 直接复用，不必再开一次面板。
+            self._armies_cache = armies or {}
+            self._army_age = time.time()
+            self.operations.observe(armies=armies, armyAt=self._army_age,
+                                    snapshotSeconds=REFRESH_SECONDS)
         except Exception:
             log.debug("网页军队刷新失败", exc_info=True)
             error = "军队面板读取未完成，可手动刷新。"

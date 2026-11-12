@@ -1544,10 +1544,18 @@
       (facts.armySlots ? " · 编队 " + facts.armySlots.join(" / ") : "");
     // 编队状态是「刚读的」还是「一分半前的」，要写清楚，不然看着像不同步
     const armyAt = Number(facts.armyAt || 0);
+    // 这里三处数字必须说同一件事：多久前读的、多久自动刷一次、超期了就说实话。
+    // 以前前端写死「每 20 秒」，而服务端实际是 240 秒，于是出现
+    // 「读取于 288 秒前（每 20 秒自动刷新）」这种自相矛盾的话。
+    const agoSeconds = Math.max(0, Math.round(Date.now() / 1000 - armyAt));
+    const everySeconds = Number(ops.facts.snapshotSeconds || 240);
+    const everyText = everySeconds >= 90
+      ? "每 " + Math.round(everySeconds / 60) + " 分钟" : "每 " + everySeconds + " 秒";
+    const overdue = agoSeconds > everySeconds * 1.5;
     $("armyFresh").textContent = armyAt
-      ? "编队状态读取于 " + Math.max(0, Math.round(Date.now() / 1000 - armyAt)) + " 秒前（每 "
-        + ((ops.facts.snapshotSeconds || 20)) + " 秒自动刷新）"
-      : "还没成功读过编队状态（点右上角「刷新游戏状态」）";
+      ? "编队状态读取于 " + agoSeconds + " 秒前 · " + everyText + "自动刷新"
+        + (overdue ? "（这次隔得久了，脚本正忙着别的任务）" : "")
+      : "还没成功读过编队状态（点上方「刷新游戏状态」）";
     textItems($("buildFacts"), buildings.length ? buildings.map(([name, b]) => name + " · " + b.level + " 级" + (b.busy ? " · 施工中" : "")) : ["尚未读到建筑等级"]);
     renderArmies(armies);
     const names = ["主城", ...ops.buildingNames.filter(name => name !== "主城")];

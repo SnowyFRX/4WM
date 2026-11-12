@@ -18,6 +18,11 @@ MAX_JOBS = 1000
 #        "active": "一队"}
 
 
+# 网页上「游戏状态」的自动刷新周期。原来写死 240，但网页文案写的是 20 秒，
+# 两边对不上，用户看到「读取于 288 秒前（每 20 秒自动刷新）」这种自相矛盾的话。
+REFRESH_SECONDS = 240
+
+
 class Operations:
     def __init__(self, path=Path(ROOT, "data", "operation_queues.json")):
         self.lock = threading.Lock()
@@ -263,7 +268,7 @@ class Operations:
         with self.lock:
             self.refreshing = False
             self.refresh_error = error
-            self.next_refresh = time.monotonic() + 240
+            self.next_refresh = time.monotonic() + REFRESH_SECONDS
 
     def observe(self, **facts):
         with self.lock:
