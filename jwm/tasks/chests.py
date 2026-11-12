@@ -60,6 +60,16 @@ class Chests:
 
         box = {"sc": self.open_army_panel(), "claimed": 0, "stop": False}
 
+        def grab():
+            """翻页必须拿到「当前真实那一屏」。
+
+            以前传的是 lambda: box["sc"]（缓存），swipe 之后没人重新截图，
+            walk 每一轮读到的都是同一张旧屏 → 第一页就 break，
+            第 5 支往下的宝箱永远看不到。
+            """
+            box["sc"] = self.ui.grab()
+            return box["sc"]
+
         def page(screen):
             box["sc"] = screen
             for _ in range(20):
@@ -79,7 +89,7 @@ class Chests:
                     box["sc"] = screen
             return not box["stop"]
 
-        pages = walk(lambda: box["sc"],
+        pages = walk(grab,
                      lambda: self.dev.swipe(370, 900, 370, 724, 420, delay=0.7),
                      page, max_pages=self.MAX_PAGES)
         claimed = box["claimed"]

@@ -914,6 +914,91 @@ class Expand:
         except Exception:
             return False
 
+    def _squad_list(self):
+        """当前配置的开荒小队（拿不到就当成没有小队，退回按单支判断）。"""
+        ops = getattr(self.bot, "operations", None)
+        if ops is None:
+            return []
+        try:
+            return ops.squad_snapshot()
+        except Exception:
+            log.debug("读取小队配置失败，按单支判断", exc_info=True)
+            return []
+
+    @staticmethod
+    def recall_targets(armies, thr, weak=(), names=None, squads=None):
+        """挑出这一轮要召回哪些编队，返回 [(tap_y, name, secs, loc, hp, why)]。
+
+        为什么要有这一步：出兵那边有 _dispatch_whole_squad，同一小队一起走、
+        绝不拆开；召回这边以前是逐支按自己血量判断，于是小队里血高一点的那支
+        被留在外面，一起出征的两支回城时散成两支 —— 用户反馈的「召回把小队拆开」。
+
+        规则（按优先级）：
+          1. 已经在主城的不用召；
+          2. 位置没读清、又不是点名召回 → 不乱动（和以前一致，别误召）；
+          3. 点名召回只认点名的；
+          4. 单支需要：缺员名单里，或血量低于阈值；
+          5. **小队整体**：小队里只要有一个人需要回城，这一队在外面的成员一起回。
+        """
+        weak = set(weak or ())
+        want_named = set(names) if names is not None else None
+
+        squad_of = {}
+        squad_members = {}
+        for sq in squads or ():
+            if sq.get("on") is False:
+                continue
+            members = [str(n).strip() for n in (sq.get("armies") or []) if str(n).strip()]
+            if not members:
+                continue
+            sq_name = sq.get("name") or "小队"
+            squad_members[sq_name] = set(members)
+            for n in members:
+                squad_of[n] = sq_name
+
+        rows = []
+        for tap_y, name, secs, loc, hp in armies:
+            if "主城" in (loc or ""):
+                continue                      # 已经在主城
+            # 位置读不到也先留着：它自己没理由时不召回，
+            # 但同队有人在外的必须一起回来 —— 否则队伍照样被拆开。
+            rows.append({"tap_y": tap_y, "name": name, "secs": secs,
+                         "loc": loc, "hp": hp, "no_loc": not loc})
+
+        # 第一遍：单支自己是否需要回城
+        need = {}
+        for r in rows:
+            if want_named is not None:
+                continue
+            if r["no_loc"]:
+                continue                      # 位置不明：不单独判定，等队友带
+            if r["name"] in weak:
+                need[r["name"]] = "缺员，回城补兵"
+            elif r["hp"] is not None and r["hp"] < thr:
+                need[r["name"]] = "回主城休整"
+
+        # 第二遍：小队整体带回来（出兵不拆队，召回也不能拆）
+        pulled = {}
+        need_names = set(need)
+        for r in rows:
+            sq = squad_of.get(r["name"])
+            if not sq:
+                continue
+            if squad_members.get(sq, set()) & need_names:
+                pulled[r["name"]] = "同队有人要回城，整队一起走"
+
+        out = []
+        for r in rows:
+            if want_named is not None:
+                if r["name"] in want_named:
+                    out.append((r["tap_y"], r["name"], r["secs"], r["loc"], r["hp"], "按指定召回"))
+                continue
+            # 自己有理由就写自己的（血量低/缺员），只有被队友带回来的才写「同队」
+            why = need.get(r["name"]) or pulled.get(r["name"])
+            if why:
+                out.append((r["tap_y"], r["name"], r["secs"], r["loc"], r["hp"], why))
+        return out
+
     def recall(self, names=None, thr=None):
         """把在外面的空闲编队调回主城：血量低的回血、缺员的回城补兵。
 
@@ -941,25 +1026,20 @@ class Expand:
             self.ui.to_map()
             return []
         weak = set(self.state.data.get("understrength", []))
+        squads = self._squad_list()
         picked, seen = [], set()
         for page in range(3):
             armies = [a for a in self.list_armies(sc) if a[1] not in seen]
             if not armies:
                 break
+            # 先整屏算一次「该召谁」——含小队整体判断，再按结果去点
+            targets = {row[1]: row[5] for row in self.recall_targets(
+                armies, thr, weak=weak, names=names, squads=squads)}
             for a in armies:
                 seen.add(a[1])
                 tap_y, name, secs, loc, hp = a
-                if "主城" in (loc or ""):
-                    continue          # 已经在主城，不用召
-                if not loc and names is None:
-                    continue          # 位置没读清、又不是点名召回：不乱动
-                if names is not None:
-                    want, why = name in names, "按指定召回"
-                elif name in weak:
-                    want, why = True, "缺员，回城补兵"
-                else:
-                    want, why = hp is not None and hp < thr, "回主城休整"
-                if not want:
+                why = targets.get(name)
+                if not why:
                     continue
                 before = self.read_selected(sc)
                 self.dev.tap(400, tap_y, delay=0.6)
@@ -1266,6 +1346,19 @@ class Expand:
         self.tried_armies = picked
         return self._commit_dispatch(sc, label, picked, approve, learn_key)
 
+    @staticmethod
+    def squad_ready(picked, allowed):
+        """小队成员是否全部就位。
+
+        用户定的规矩：指派和召回，一个小队里的编队必须同步。
+        所以只要有成员没勾上（行军太远、选不中、出征位不够），
+        整队就不派 —— 派一半出去等于把小队拆了。
+        """
+        allowed = [n for n in (allowed or []) if n]
+        if not allowed:
+            return True
+        return set(allowed) <= set(picked or ())
+
     def _dispatch_whole_squad(self, sc, allowed, approve, learn_key):
         """把小队成员一次性全部勾上，再统一读一次预测。
 
@@ -1306,6 +1399,13 @@ class Expand:
                 break
             sc = self.scroll_armies()
         label = self.read_forecast(self.ui.grab())
+        if not self.squad_ready(picked, allowed):
+            missing = [n for n in allowed if n not in picked]
+            log.warning("  小队没齐（%s 没并入），整队不派 —— 派一半就把小队拆了",
+                        "、".join(missing))
+            self.ui.close()
+            self.tried_armies = []
+            return "no_army", None
         if picked:
             log.info("  小队同时指派：%s → 预测: %s", "、".join(picked), label or "未读到")
         self.tried_armies = picked
