@@ -56,8 +56,8 @@
   * { box-sizing: border-box; }
   body {
     margin: 0;
-    /* 整页就是一片深海，鲨鱼在底下游，内容浮在上面 */
-    background: #0d0c0b;
+    /* 底色和引擎画布同色（#f4efe5）：鲨鱼是纸上的一层墨，不是一块深色面板 */
+    background: #f4efe5;
     color: var(--body);
     font: 400 15px/1.55 var(--font-sans);
     -webkit-font-smoothing: antialiased;
@@ -84,7 +84,7 @@
     color: var(--ink);
     margin: 0;
   }
-  h1 { font-size: 36px; line-height: 1.15; letter-spacing: -.5px; color: var(--on-dark); }
+  h1 { font-size: 36px; line-height: 1.15; letter-spacing: -.5px; color: var(--ink); }
   h2 { font-size: 22px; line-height: 1.2; letter-spacing: -.3px; margin-bottom: var(--s-3); }
   p { margin: 0; }
 
@@ -97,31 +97,36 @@
   header {
     display: flex; justify-content: space-between; align-items: baseline; gap: var(--s-4);
     padding-bottom: var(--s-5); margin-bottom: var(--s-5);
-    border-bottom: 1px solid #faf9f51f;
+    border-bottom: 1px solid #c9c0b0;
   }
-  #url { color: var(--on-dark-soft); font-size: 14px; font-variant-numeric: tabular-nums; }
+  #url { color: var(--muted); font-size: 14px; font-variant-numeric: tabular-nums; }
 
   /* ---------- 页脚署名：压在海洋上的一行小字 ---------- */
   .credit {
     position: relative; z-index: 1;
     max-width: 1080px; margin: 0 auto;
     padding: 0 var(--s-5) var(--s-5);
-    color: var(--on-dark-soft);
+    color: var(--muted-soft);
     font: 500 11px/1.4 var(--font-sans);
     letter-spacing: 1.3px; text-transform: uppercase;
     text-align: right;
   }
-  .credit a { color: var(--on-dark-soft); text-decoration: none; }
-  .credit a:hover { color: var(--on-dark); text-decoration: underline; text-underline-offset: 2px; }
+  .credit a { color: var(--muted); text-decoration: none; }
+  .credit a:hover { color: var(--ink); text-decoration: underline; text-underline-offset: 2px; }
 
   /* ---------- 卡片 ---------- */
   .grid { display: grid; gap: var(--s-4); }
+  /* 半透明玻璃卡：能看见后面游的鲨鱼，但文字仍然清楚。
+     rgba 的 0.70 是量过的 —— 米色叠在 #0d0c0b 上约等效 #b3b2ae，
+     正文 #141413 对比度仍有 ~7:1，高于 AA 的 4.5。 */
   .panel {
-    background: var(--canvas);
-    border: 1px solid var(--hairline);
+    /* 不做背景模糊：ASCII 点阵一糊就成脏斑。
+       这里就是纯半透明白，让底下的墨色字符原样透上来 —— 透得干净，不是糊得发灰。 */
+    background: rgba(255, 253, 247, .58);
+    border: 1px solid #ffffffA6;
     border-radius: var(--r-lg);
     padding: var(--s-6);
-    box-shadow: 0 24px 48px -32px #000000E6;
+    box-shadow: 0 24px 48px -38px #3a342B4D;
   }
   .panel.soft { background: var(--surface-soft); border-color: transparent; }
 
@@ -142,11 +147,13 @@
     color: var(--ink);
   }
   .status.on { color: #2f7a48; }
-  .status.off { color: var(--muted); }
+  .status.off { color: #55534e; }
 
   .kv {
     display: flex; gap: var(--s-4); flex-wrap: wrap;
-    color: var(--muted); font-size: 14px;
+    /* 玻璃卡把底色拉暗了：面板里的次要文字要比 --muted 更深一档，
+       否则 rgba(.70) 的等效底 (#b3b2ae) 上只有 2.6:1。 */
+    color: #403e3a; font-size: 14px;
     font-variant-numeric: tabular-nums;
   }
 
@@ -180,22 +187,36 @@
   }
   a.link:hover { color: var(--primary-active); text-decoration: underline; text-underline-offset: 2px; }
 
-  .hint { color: var(--muted); font-size: 14px; margin-top: var(--s-4); line-height: 1.65; }
+  .hint { color: #403e3a; font-size: 14px; margin-top: var(--s-4); line-height: 1.65; }
 
   /* ---------- 日志窗：深色代码面 ---------- */
-  .log-card { background: var(--surface-dark); border-color: transparent; }
-  .log-card h2 { color: var(--on-dark); }
-  .log-card .meta { color: var(--on-dark-soft); font-size: 11px; letter-spacing: 1.4px; text-transform: uppercase; }
+  /* 日志卡：整块透明 —— 没有底、没有边、没有投影，只有标题和文字浮在纸上 */
+  .log-card {
+    /* 仍然不是卡片：没有边框、没有圆角、没有投影。
+       只是一块「纸被擦白了一点」的区域 —— 上下渐隐，看不出边界。
+       不这么做的话，鲨鱼游过日志就会把字压糊（ASCII 纹理和等宽文字叠一起没法读）。 */
+    background: linear-gradient(180deg,
+      rgba(250, 248, 242, 0) 0%,
+      rgba(250, 248, 242, .90) 5%,
+      rgba(250, 248, 242, .94) 92%,
+      rgba(250, 248, 242, 0) 100%);
+    border-color: transparent;
+    box-shadow: none;
+    padding-left: var(--s-3);
+    padding-right: var(--s-3);
+  }
+  .log-card h2 { color: var(--ink); }
+  .log-card .meta { color: var(--muted); font-size: 11px; letter-spacing: 1.4px; text-transform: uppercase; }
   pre {
-    margin: var(--s-3) 0 0;
-    padding: var(--s-4);
-    background: #101010;
-    border: 1px solid #ffffff12;
-    border-radius: var(--r-md);
-    font: 400 13px/1.7 var(--font-mono);
-    color: #b9b4aa;
-    max-height: 420px;
-    overflow: auto;
+    margin: var(--s-2) 0 0;
+    padding: 0;
+    background: transparent;
+    border: 0;
+    border-radius: 0;
+    font: 400 12.5px/1.75 var(--font-mono);
+    color: #3a352e;
+    -webkit-mask-image: linear-gradient(180deg, #000 calc(100% - 26px), transparent 100%);
+    mask-image: linear-gradient(180deg, #000 calc(100% - 26px), transparent 100%);
     white-space: pre-wrap;
     word-break: break-all;
   }
@@ -240,7 +261,7 @@
 
     <section class="panel log-card">
       <h2>运行日志</h2>
-      <p class="meta">实时 · 每 2 秒刷新</p>
+      <p class="meta">最新 18 行 · 每 2 秒刷新</p>
       <pre id="log">等待启动…</pre>
     </section>
   </div>
@@ -272,7 +293,11 @@
     $("openApp").style.display = on ? "" : "none";
     // 带版本号，避免浏览器沿用旧页面脚本（旧脚本会在初始化时抛错、永远显示离线）
     if (on) $("openApp").href = "/map/?v=16";
-    if (s.log && s.log.length) $("log").textContent = s.log.join("\n");
+    // 只留最新的十几行：这块不滚动了，多了会把页面撑长
+    if (s.log && s.log.length) {
+      const LOG_LINES = 18;
+      $("log").textContent = s.log.slice(-LOG_LINES).join("\n");
+    }
   }
   async function post(path) {
     if (busy) return;

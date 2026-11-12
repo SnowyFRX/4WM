@@ -700,29 +700,29 @@ const FISH_ALPHAS = [
 ];
 const DOT_RGB = [
     [
-        48,
-        52,
-        235
+        92,
+        104,
+        132
     ],
     [
-        52,
-        205,
-        60
+        96,
+        122,
+        96
     ],
     [
-        228,
-        50,
-        44
+        150,
+        92,
+        76
     ],
     [
-        190,
-        212,
-        255
+        86,
+        78,
+        66
     ],
     [
-        110,
-        230,
-        255
+        126,
+        118,
+        100
     ]
 ];
 const DOT_BASE_ALPHA = [
@@ -734,13 +734,13 @@ const DOT_BASE_ALPHA = [
 ];
 const WAKE = DOT_RGB.length - 1;
 const ACCENTS = [
-    "#e0892c",
-    "#e03a32",
-    "#b44ae0",
-    "#33c8cc",
-    "#3cb54a",
-    "#3150e8",
-    "#d9c14a"
+    "#cc785c",
+    "#b5654a",
+    "#8a7b5c",
+    "#6f7f74",
+    "#a8583f",
+    "#7b6a8a",
+    "#c9a227"
 ];
 const SKIN_RAMP = ":;t%SX8#@";
 const FIN_GLYPHS = "%;tS:";
@@ -1132,7 +1132,7 @@ function inTriangle(px, py, ax, ay, bx, by, cx, cy) {
 }
 function paintGrid(g, W, H, cw, ch, dpr) {
     g.setTransform(1, 0, 0, 1, 0, 0);
-    g.strokeStyle = "rgba(255,255,255,0.055)";
+    g.strokeStyle = "rgba(58, 52, 42, 0.085)";
     g.lineWidth = 1;
     g.beginPath();
     for(let c = 0; c <= Math.ceil(W / cw); c++){
@@ -1190,7 +1190,7 @@ class AsciiRenderer {
     fishStamp = new Uint32Array(0);
     frameId = 0;
     fishBuckets = FISH_ALPHAS.map(()=>[]);
-    fishStyles = FISH_ALPHAS.map((a)=>`rgba(230,238,255,${a})`);
+    fishStyles = FISH_ALPHAS.map((a)=>`rgba(74, 66, 54, ${a})`);
     constructor(canvas){
         this.canvas = canvas;
         const ctx = canvas.getContext("2d", {
@@ -1262,7 +1262,7 @@ class AsciiRenderer {
         if (!g) return;
         const { width: W, height: H, dpr, cw, ch } = this;
         g.setTransform(dpr, 0, 0, dpr, 0, 0);
-        g.fillStyle = "#000";
+        g.fillStyle = "#f4efe5";
         g.fillRect(0, 0, W, H);
         paintGrid(g, W, H, cw, ch, dpr);
     }
@@ -1592,14 +1592,15 @@ class AsciiRenderer {
                 glyph = SKIN_RAMP[clamp(Math.floor((1 - shade) * 8.99) + jitter, 0, SKIN_RAMP.length - 1)];
             }
             level *= dim;
-            ctx.fillStyle = `rgb(${Math.min(255, Math.round(level * tr))},${Math.min(255, Math.round(level * tg))},${Math.min(255, Math.round(level * tb + 4))})`;
+            const inkAlpha = (1 - Math.min(1, level / 255)) * 0.9;
+            ctx.fillStyle = `rgba(${Math.round(52 * tr)},${Math.round(47 * tg)},${Math.round(40 * tb)},${inkAlpha.toFixed(3)})`;
             ctx.fillRect(x + 1, y + 1, cw - 1, ch - 1);
             let color;
-            if (flag === FLAG_EYE) color = "#9aa0ad";
-            else if (flag === FLAG_MARK) color = `rgb(${Math.round(70 * tr)},${Math.round(70 * tg)},${Math.round(70 * tb)})`;
+            if (flag === FLAG_EYE) color = "#fdfaf3";
+            else if (flag === FLAG_MARK) color = `rgb(${Math.round(228 * tr)},${Math.round(220 * tg)},${Math.round(204 * tb)})`;
             else if (roll < 0.09) color = ACCENTS[key % ACCENTS.length];
             else if (roll < 0.13) color = "#ffffff";
-            else color = shade > 0.55 ? "#0e0f13" : "#1b1d24";
+            else color = shade > 0.55 ? "#f7f2e8" : "#e8dfcd";
             ctx.fillStyle = color;
             ctx.fillText(glyph, x + cw / 2, y + ch / 2 + 1);
         }

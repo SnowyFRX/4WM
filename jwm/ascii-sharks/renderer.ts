@@ -13,17 +13,20 @@ const ALPHA_LEVELS = 6;
 const FISH_ALPHAS = [0.28, 0.42, 0.58, 0.74, 0.9];
 
 // Dot colour classes: blue, green, red, pale; the last entry is the cyan wake.
+// 米黄底上的点阵：原来是蓝/绿/红/白/青，在浅底上会显脏。
+// 改成一组暖墨与低饱和的旧彩色，像纸上印出来的颗粒。
 const DOT_RGB: [number, number, number][] = [
-  [48, 52, 235],
-  [52, 205, 60],
-  [228, 50, 44],
-  [190, 212, 255],
-  [110, 230, 255],
+  [92, 104, 132],
+  [96, 122, 96],
+  [150, 92, 76],
+  [86, 78, 66],
+  [126, 118, 100],
 ];
 const DOT_BASE_ALPHA = [1, 1, 1, 1, 1];
 const WAKE = DOT_RGB.length - 1;
 
-const ACCENTS = ["#e0892c", "#e03a32", "#b44ae0", "#33c8cc", "#3cb54a", "#3150e8", "#d9c14a"];
+// 强调色跟着页面主色走（珊瑚 #cc785c 一族 + 几个纸上的旧彩），只在少数格子上点缀
+const ACCENTS = ["#cc785c", "#b5654a", "#8a7b5c", "#6f7f74", "#a8583f", "#7b6a8a", "#c9a227"];
 
 // Sparse glyphs on bright skin, dense glyphs in shadow, so the texture
 // reinforces the shading instead of fighting it.
@@ -250,7 +253,7 @@ function inTriangle(
 /** Visible dark-grey cell grid, snapped to device pixels. Shared with the sidebar backdrop. */
 export function paintGrid(g: CanvasRenderingContext2D, W: number, H: number, cw: number, ch: number, dpr: number) {
   g.setTransform(1, 0, 0, 1, 0, 0);
-  g.strokeStyle = "rgba(255,255,255,0.055)";
+  g.strokeStyle = "rgba(58, 52, 42, 0.085)";
   g.lineWidth = 1;
   g.beginPath();
   for (let c = 0; c <= Math.ceil(W / cw); c++) {
@@ -315,7 +318,8 @@ export class AsciiRenderer {
   private frameId = 0;
   /** Fish cells bucketed by brightness, so each bucket is one fillStyle. */
   private fishBuckets: number[][] = FISH_ALPHAS.map(() => []);
-  private fishStyles = FISH_ALPHAS.map((a) => `rgba(230,238,255,${a})`);
+  // 浅底上的鱼用暖墨（原来是在黑底上画浅蓝白）
+  private fishStyles = FISH_ALPHAS.map((a) => `rgba(74, 66, 54, ${a})`);
 
   constructor(private canvas: HTMLCanvasElement) {
     const ctx = canvas.getContext("2d", { alpha: false });
@@ -395,7 +399,7 @@ export class AsciiRenderer {
     if (!g) return;
     const { width: W, height: H, dpr, cw, ch } = this;
     g.setTransform(dpr, 0, 0, dpr, 0, 0);
-    g.fillStyle = "#000";
+    g.fillStyle = "#f4efe5";
     g.fillRect(0, 0, W, H);
     paintGrid(g, W, H, cw, ch, dpr);
   }
@@ -801,16 +805,18 @@ export class AsciiRenderer {
         glyph = SKIN_RAMP[clamp(Math.floor((1 - shade) * 8.99) + jitter, 0, SKIN_RAMP.length - 1)];
       }
       level *= dim;
-      // Tinted per species; the classic tint is a cool blue-grey, like a back seen through deep water.
-      ctx.fillStyle = `rgb(${Math.min(255, Math.round(level * tr))},${Math.min(255, Math.round(level * tg))},${Math.min(255, Math.round(level * tb + 4))})`;
+      // 底色是米黄，所以这里不再画「亮度块」，而是按亮度叠一层墨：
+      // level 高（受光）→ 墨淡，几乎透出底色；level 低（背光）→ 墨深。
+      const inkAlpha = (1 - Math.min(1, level / 255)) * 0.9;
+      ctx.fillStyle = `rgba(${Math.round(52 * tr)},${Math.round(47 * tg)},${Math.round(40 * tb)},${inkAlpha.toFixed(3)})`;
       ctx.fillRect(x + 1, y + 1, cw - 1, ch - 1);
 
       let color: string;
-      if (flag === FLAG_EYE) color = "#9aa0ad";
-      else if (flag === FLAG_MARK) color = `rgb(${Math.round(70 * tr)},${Math.round(70 * tg)},${Math.round(70 * tb)})`;
+      if (flag === FLAG_EYE) color = "#fdfaf3";
+      else if (flag === FLAG_MARK) color = `rgb(${Math.round(228 * tr)},${Math.round(220 * tg)},${Math.round(204 * tb)})`;
       else if (roll < 0.09) color = ACCENTS[key % ACCENTS.length];
       else if (roll < 0.13) color = "#ffffff";
-      else color = shade > 0.55 ? "#0e0f13" : "#1b1d24";
+      else color = shade > 0.55 ? "#f7f2e8" : "#e8dfcd";
       ctx.fillStyle = color;
       ctx.fillText(glyph, x + cw / 2, y + ch / 2 + 1);
     }
