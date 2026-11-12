@@ -250,11 +250,11 @@ class RouteCamera:
         ax, ay, gx, gy = self.anchor
         return gx + round((point[0] - ax) / mv.TILE), gy - round((point[1] - ay) / mv.TILE)
 
-    def capture(self, target=None, expected_home=None):
+    def capture(self, target=None, expected_home=None, limit=None, tol=None):
         img = self._read_home()
         if expected_home is not None and self.home != expected_home:
             return None
-        return self._capture_from(img, target)
+        return self._capture_from(img, target, limit=limit, tol=tol)
 
     def _resume_view(self, home):
         """只有当前截图与已标定截图的大片地形吻合时，才复用坐标。"""
@@ -268,13 +268,15 @@ class RouteCamera:
             if saved_home != home:
                 continue
             try:
-                dx, dy = measured_shift(previous, sc.img, 0, 0, min_score=0.92, min_matches=3)
+                # 原先 0.92/3 太严：镜头稍有变化就判失败，退回「从主城校准」（15~29 秒）。
+                # 0.90/3 仍要求三处匹配点，误判风险很低，但复用率高很多。
+                dx, dy = measured_shift(previous, sc.img, 0, 0, min_score=0.90, min_matches=3)
             except ValueError:
                 continue
             # 比较匹配点以外的大面积地形。草地纹理或固定按钮相似不足以认定是同一地点。
             before = previous[385:945, 100:550]
             after = sc.img[385 + dy:945 + dy, 100 + dx:550 + dx]
-            if (cv2.absdiff(before, after).max(axis=2) <= 16).mean() < 0.86:
+            if (cv2.absdiff(before, after).max(axis=2) <= 16).mean() < 0.82:
                 continue
             ax, ay, gx, gy = anchor
             self.anchor = (ax + dx, ay + dy, gx, gy)
@@ -295,22 +297,33 @@ class RouteCamera:
             grid = self._capture_from(img, target, quick=True)
         except ValueError:
             # 快速拖动丢失参照时，从主城用原来的稳速流程重定位。
-            grid = self.capture(target, home)
+            # 远距离时镜头不在上次位置，复用必然失败，只能从主城拖过去。
+            # 这条路以前每次只挪 210px（45 格要拖 15 次、真机 21 秒），
+            # 这里放大到 350px/容差 50px，次数少一半。
+            grid = self.capture(target, home, limit=350, tol=50)
             reused = False
         log.debug("网页地图读取 %.2fs，%s", perf_counter() - started,
                   "复用已校准视野" if reused else "从主城校准")
         return grid
 
-    def _capture_from(self, img, target, *, quick=False):
+    def _capture_from(self, img, target, *, quick=False, limit=None, tol=None):
+        # quick 是网页上「同步模拟器到这里」用的粗定位：用户要的是「镜头到这一带」，
+        # 不需要像素级居中，所以步长放大、容差放宽。
+        # limit/tol 允许调用方再放宽一档（远距离从主城出发时用），开荒读图仍走默认值。
+        if limit is None:
+            limit = 420 if quick else 210
+        if tol is None:
+            tol = 55 if quick else 40
+        tries = 10 if quick else 16
         if target is not None:
-            for _ in range(16):
+            for _ in range(tries):
                 ax, ay, gx, gy = self.anchor
                 x = ax + (target[0] - gx) * mv.TILE
                 y = ay - (target[1] - gy) * mv.TILE
                 dx, dy = SCREEN_CENTER[0] - x, SCREEN_CENTER[1] - y
-                if max(abs(dx), abs(dy)) < 40:
+                if max(abs(dx), abs(dy)) < tol:
                     break
-                dx, dy = (round(max(-210, min(210, d))) for d in (dx, dy))
+                dx, dy = (round(max(-limit, min(limit, d))) for d in (dx, dy))
                 ui = self.expand.ui
                 if quick:
                     # 短拖动完成后直接等待地图稳定，省去通用导航的额外截图等待。

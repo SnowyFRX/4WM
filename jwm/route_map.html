@@ -1062,7 +1062,12 @@
     if (!regionSelect) clearRegionBox();
   };
   $("syncNow").onclick = () => {
-    $("syncHint").textContent = "正在把模拟器镜头移到这里并重新截图…";
+    const p = gamePoint();
+    const d = state?.home
+      ? Math.max(Math.abs(p[0] - state.home[0]), Math.abs(p[1] - state.home[1])) : 0;
+    $("syncHint").textContent = d > 12
+      ? "已提交：镜头要分几次拖过去，大约十几秒（脚本开荒会先让一让）…"
+      : "已提交：正在把镜头移过去…";
     command("scan", state?.home ? { center: gamePoint(), viewport: visibleBounds() } : {});
   };
   const board = $("map");

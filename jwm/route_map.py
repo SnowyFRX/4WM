@@ -166,18 +166,24 @@ class RouteMap:
             if action == "operations" and self.operations:
                 self.operations.command(data)
             elif action == "scan":
-                if self.scan or self.scanning:
-                    raise ValueError("地图正在读取，请稍等。")
                 point = data.get("center")
-                if point is None:
-                    self.scan = ("home", None)
-                elif (self.home and isinstance(point, list) and len(point) == 2
-                      and all(type(n) is int and n >= 0 for n in point)
-                      and all(abs(n - h) <= SCAN_RADIUS for n, h in zip(point, self.home))):
-                    self.viewport = self._viewport(data.get("viewport"))
-                    self.scan = ("point", tuple(point))
+                target = None
+                if point is not None:
+                    if not (self.home and isinstance(point, list) and len(point) == 2
+                            and all(type(n) is int and n >= 0 for n in point)
+                            and all(abs(n - h) <= SCAN_RADIUS for n, h in zip(point, self.home))):
+                        raise ValueError("该位置超出主城周边的可读取范围。")
+                    target = tuple(point)
+                # 上一张还没读完时，把这次当成「下一个」记下来，读完自动跟过去。
+                # 以前这里直接抛「地图正在读取，请稍等」——用户点了没反应、只能反复点，
+                # 而且一旦扫描卡住就永远等不到。现在点了就算排队，一定会有反馈。
+                if self.scan or self.scanning:
+                    self.pending_scans = deque([target]) if target else deque()
+                    self.status = ("已排队：这一轮读完后镜头会自动移到 %s。" % (target,)
+                                   if target else "已排队：这一轮读完后重读主城周边。")
                 else:
-                    raise ValueError("该位置超出主城周边的可读取范围。")
+                    self.viewport = self._viewport(data.get("viewport"))
+                    self.scan = ("point", target) if target else ("home", None)
                 self.map_error = ""
             elif action == "scan_region":
                 # 用户在地图上框一块区域 → 只把这几个视野重扫一遍（别的格子不动）
