@@ -1616,8 +1616,17 @@
     const armies = Object.entries(facts.armies ?? {});
     const chosen = [...$("squadArmies").selectedOptions].map(o => o.value);
     replaceOptions($("squadArmies"), armies.length ? armies.map(([name, a]) =>
-      [name, name + (a.state ? " · " + a.state : "")]) : []);
+      [name, name + (a.state ? " · " + a.state : "")])
+      // 没读到编队时给一个禁用提示，而不是一个空框 —— 空框看着像坏了
+      : [["", "还没读到编队（先去「城建与军队」页刷新）"]]);
+    const empty = !armies.length;
+    $("squadArmies").disabled = empty;
     for (const opt of $("squadArmies").options) opt.selected = chosen.includes(opt.value);
+    const saveBtn = $("addSquad")?.querySelector("button[type=submit]");
+    if (saveBtn) {
+      saveBtn.disabled = empty;
+      saveBtn.title = empty ? "先读到编队才能建小队" : "";
+    }
   }
   const TUNE_CN = {
     distance_penalty: "距离惩罚", distance_free_rings: "免惩罚圈数", max_difficulty: "难度上限",
