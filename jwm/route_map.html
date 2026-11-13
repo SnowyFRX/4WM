@@ -652,6 +652,7 @@
         <button id="readMap">读取当前视野</button>
         <button id="regionMode" title="在地图上拖出一个方框，只刷新这一块">框选刷新</button>
         <button id="syncNow" title="把模拟器镜头移到这里，重新截一帧拼进地图">同步模拟器到这里</button>
+        <button id="pauseScript" title="暂停后脚本不再点模拟器，你可以自己操作；再点一次继续">暂停脚本</button>
         <span class="muted" id="syncHint"></span>
       </div>
       <!-- 视图切换：全图（apk 固定地图，快且全） / 实时视野（截图拼接） -->
@@ -1061,7 +1062,21 @@
     $("undo").disabled = $("clear").disabled = !draft.length;
     $("autoplan").disabled = busy || !online || !view;
     for (const button of panButtons) button.disabled = !view;
-    $("readMap").disabled = busy || !online || state?.scanning;
+    // 暂停期间这些按钮要禁掉：它们都会让脚本去点/拖模拟器，
+    // 现在模拟器交给用户了，点了只会互相打架。
+    const isPaused = Boolean(state?.paused);
+    $("readMap").disabled = busy || !online || state?.scanning || isPaused;
+    $("regionMode").disabled = busy || !online || isPaused;
+    $("syncNow").disabled = busy || !online || isPaused;
+    const pb = $("pauseScript");
+    if (pb) {
+      pb.textContent = isPaused ? "继续脚本" : "暂停脚本";
+      pb.classList.toggle("accent", isPaused);
+      pb.disabled = !online;
+      pb.title = isPaused
+        ? "脚本已暂停：你可以自己操作模拟器；点这里让脚本继续"
+        : "暂停后脚本不再点模拟器，你可以自己操作；再点一次继续";
+    }
     $("cacheAsk").hidden = !state?.pendingCache;
     for (const r of document.querySelectorAll('input[name="routeMode"]')) {
       r.checked = r.value === (state?.routeMode || "strict");
@@ -1169,6 +1184,9 @@
     const delta = pans[button.dataset.pan];
     if (delta) moveTo(center[0] + delta[0] * tileSize, center[1] + delta[1] * tileSize);
     else moveTo(0, 0);
+  };
+  $("pauseScript").onclick = () => {
+    command("toggle_freeze");
   };
   $("readMap").onclick = () => {
     triedCenters.clear();

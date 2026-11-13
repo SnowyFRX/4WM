@@ -239,9 +239,11 @@ class RouteMap:
                 self.recent_event = self.runtime
 
     def snapshot(self):
+        from . import pause as pause_gate
         with self.lock:
             return dict(view=self.view, frames=[entry[0] for entry in self.frames.values()],
                         scanRadius=SCAN_RADIUS,
+                        paused=pause_gate.paused(),
                         operations=self.operations.snapshot() if self.operations else None,
                         path=self.path, home=self.home, active=self.active,
                         index=self.index, revision=self.revision, status=self.status,
@@ -257,6 +259,25 @@ class RouteMap:
 
     def command(self, data):
         action = data.get("action")
+        # 注意：动作名不能叫 pause —— 那是「暂停开荒路线」的意思，已经用在路线上了。
+        # 这里是「让脚本别碰模拟器」，和路线暂停是两回事。
+        if action in ("freeze", "unfreeze", "toggle_freeze"):
+            # 暂停期间不向模拟器发输入，但进程/网页/状态都还在。
+            # 用户想手动点两下（看建筑、翻任务、拖地图）时用。
+            # 注意：phase()/snapshot() 自己会取同一把不可重入锁，必须在锁外调。
+            from . import pause as pause_gate
+            if action == "freeze":
+                on = pause_gate.set_paused(True)
+            elif action == "unfreeze":
+                on = pause_gate.set_paused(False)
+            else:
+                on = pause_gate.toggle()
+            detail = ("脚本已暂停，模拟器交给你手动操作。" if on
+                      else "已恢复，继续按计划执行。")
+            with self.lock:
+                self.status = detail
+            self.phase(detail, "idle", "paused" if on else "running")
+            return
         with self.lock:
             if action == "operations" and self.operations:
                 self.operations.command(data)

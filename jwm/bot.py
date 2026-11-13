@@ -8,6 +8,7 @@ import traceback
 import cv2
 import yaml
 
+from . import pause
 from .device import Device
 from .operations import REFRESH_SECONDS
 from .state import State
@@ -207,6 +208,11 @@ class Bot:
         idle = sched.get("idle_seconds", 20)
         log.info("开始运行，任务: %s", ", ".join(enabled))
         while True:
+            # 暂停：停在这里不动手，等用户点「继续」。进程、网页、状态都还在。
+            if pause.paused():
+                self.phase("脚本已暂停，模拟器交给你手动操作", "idle", "paused")
+                pause.wait()
+                self.phase("已恢复，继续按计划执行", "idle", "running")
             # 地图扫描是有状态的慢活（要回城、拖镜头、拼图），一旦开始就做完，
             # 不再像以前那样在每个任务前插一次、把一次扫描切成几段（那样看起来在做一半就跑去干别的）。
             if self.route:

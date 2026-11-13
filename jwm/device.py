@@ -270,6 +270,11 @@ class Device:
             raise RuntimeError("adb 失败: %s\n%s" % (" ".join(args), r.stderr.decode("utf-8", "ignore")))
         return r.stdout
 
+    # 这些命令会让模拟器「动」：点击、滑动、按键、启动/关闭应用。
+    # 暂停期间必须拦住 —— 否则用户手动操作时脚本还在点，两边互相打断。
+    # 截图/查询不在此列：只读，不干扰用户，网页还要靠它显示画面。
+    _MOTION_PREFIXES = ("input ", "monkey ", "am force-stop")
+
     def shell(self, cmd, timeout=30):
         """执行一条 shell 命令。优先常驻 shell，坏了就重建，重建不了退回一次性调用。
 
@@ -277,6 +282,12 @@ class Device:
         每一步失败都要**先把旧 shell 作废**，不能拿半截管道继续写 —— 否则下一条命令
         可能读到上一条的残留输出。
         """
+        if cmd.startswith(self._MOTION_PREFIXES):
+            from . import pause
+            if pause.paused():
+                log.info("脚本已暂停：%s 这条命令先压着不发", cmd.split()[0])
+                pause.wait()          # 停在这儿，恢复后继续
+                log.info("脚本已恢复，继续执行")
         if self.sh is not None and getattr(self.sh, "dead", False):
             self.sh.close()
             self.sh = None
