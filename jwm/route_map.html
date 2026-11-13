@@ -215,6 +215,8 @@
   /* hidden 属性自带 display:none，但上面写了 display:grid 会把它压掉，
      结果「切到全图视图」时实时视野那块仍然占着位置，两个地图上下叠在一起 */
   .viewport[hidden] { display: none; }
+  /* 按钮默认是 inline-block，会把 hidden 压掉，跟 .viewport 那次是同一个坑 */
+  .controls button[hidden], .controls span[hidden] { display: none; }
   #map {
     display: block; width: 100%; height: clamp(380px, 68vh, 740px);
     touch-action: none; cursor: grab;
@@ -696,14 +698,15 @@
           <canvas id="fixedCanvas"></canvas>
           <div class="fullmap-tip" id="fixedTip" hidden></div>
         </div>
+        <!-- 图例只留看得懂的那些：地块本身靠贴图就能认，这里解释的是「叠加层」 -->
         <div class="fullmap-legend">
           <span><i style="background:#4a90c7"></i>水域</span>
           <span><i style="background:#e8d67a"></i>粮地</span>
-          <span><i style="background:#569e5c"></i>木地</span>
-          <span><i style="background:#a8a8a8"></i>石地</span>
-          <span><i style="background:#cec89e"></i>荒地</span>
-          <span><i style="background:#6e6056"></i>建筑</span>
-          <span><i style="background:#96ba8c"></i>地形装饰</span>
+          <span><i style="background:#66a05e"></i>木地</span>
+          <span><i style="background:#b0b0a6"></i>石地</span>
+          <span><i style="background:#8c8c7e"></i>地形障碍（不可占）</span>
+          <span><i class="key owned"></i>已确认占领</span>
+          <span><i class="key route"></i>开荒路线</span>
         </div>
       </div>
       <div class="legend" id="liveLegend">
@@ -732,31 +735,34 @@
         <span class="label" id="progress">等待选点</span>
         <p id="routeStatus" aria-live="polite">提交路线后，从第一格开始占领。</p>
         <div class="actions" style="margin-top: 10px">
-          <button id="pause" disabled>暂停开荒</button>
-          <button id="resume" disabled>继续开荒</button>
+          <button id="pause" disabled title="只停这条路线，脚本的其它任务照跑">暂停当前路线</button>
+          <button id="resume" disabled>继续当前路线</button>
         </div>
       </section>
       <section>
         <h2>开荒小队 <span class="muted" id="squadHint"></span></h2>
-        <p class="muted">一个小队就是一组一起出征的编队。可以建多支，各自绑定一条路线，互不串台。没有小队时脚本才自己挑兵。</p>
         <ul id="squadList" class="squad-list"></ul>
-        <form id="addSquad" class="squad-form">
-          <label>小队名 <input id="squadName" maxlength="20" placeholder="例如 近战主力" required></label>
-          <label>绑定路线
-            <select id="squadRoute">
-              <option value="">不绑定（所有路线都能用）</option>
-            </select>
-          </label>
-          <label class="squad-armies">成员 <select id="squadArmies" multiple size="4"></select></label>
-          <button type="submit" class="accent">保存小队</button>
-        </form>
+        <!-- 新建小队的表单平时用不到（没有小队时脚本自己挑兵），收起来别占地方 -->
+        <details id="squadMore">
+          <summary>新建小队</summary>
+          <p class="muted">一个小队 = 一组一起出征的编队，可以各绑一条路线。不建也能正常开荒。</p>
+          <form id="addSquad" class="squad-form">
+            <label>小队名 <input id="squadName" maxlength="20" placeholder="例如 近战主力" required></label>
+            <label>绑定路线
+              <select id="squadRoute">
+                <option value="">不绑定（所有路线都能用）</option>
+              </select>
+            </label>
+            <label class="squad-armies">成员 <select id="squadArmies" multiple size="4"></select></label>
+            <button type="submit" class="accent">保存小队</button>
+          </form>
+        </details>
         <p id="squadMessage" role="status"></p>
       </section>
       <section>
         <h2>已提交路线 <span class="muted" id="routeCount"></span></h2>
-        <p class="muted">可以有多条：脚本会自动轮转，一条在等行军时就推进另一条。每条可单独暂停/删除。</p>
+        <p class="muted">可以有多条，脚本自动轮转：一条在等行军就推进另一条。点「正在查看」把它的格子标到地图上。</p>
         <ul id="routeCards" class="route-cards"></ul>
-        <ol id="routeSteps" class="route-steps"></ol>
       </section>
       <section>
         <h2 id="listTitle">规划路线</h2>
@@ -1083,18 +1089,22 @@
     }
     renderSkips(state?.skips || []);
     renderRoutes(state?.routes || [], path, index);
-    $("routeList").replaceChildren(...(draft.length ? draft : path).map((p, i) => {
+    // 这里只列**草稿**。当前已提交的路线由上面的卡片表示，格子直接画在固定地图上，
+    // 不再在侧栏重复列一遍（以前「已提交路线」和「规划路线」各列一次同样的坐标）。
+    if (draft.length) {
+      $("routeList").replaceChildren(...draft.map((p, i) => {
+        const item = document.createElement("li");
+        item.textContent = position(p);
+        return item;
+      }));
+    } else {
       const item = document.createElement("li");
-      item.textContent = position(p);
-      if (!draft.length && i < index) {
-        item.className = "done";
-        item.textContent += " · 已占领";
-      } else if (!draft.length && i === index) {
-        item.className = "current";
-        item.textContent += " · 当前目标";
-      }
-      return item;
-    }));
+      item.className = "muted";
+      item.textContent = path.length
+        ? "草稿为空 —— 在地图上点格子开始规划；当前路线已画在地图上。"
+        : "草稿为空 —— 在地图上点格子开始规划。";
+      $("routeList").replaceChildren(item);
+    }
     draw();
     if (view) moveTo(...center);
     if (state?.operations) {
@@ -1489,7 +1499,6 @@
   // 多条路线：每条一张卡（暂停/继续、删除、切过去看格子）
   function renderRoutes(routes, currentPath, currentIndex) {
     const list = $("routeCards");
-    const steps = $("routeSteps");
     $("routeCount").textContent = routes.length ? routes.length + " 条" : "";
     const sig = JSON.stringify(routes);
     if (list.dataset.sig !== sig) {
@@ -1536,15 +1545,6 @@
         }));
       }
     }
-    const cur = routes.find(r => r.current);
-    if (!cur) { steps.replaceChildren(); return; }
-    steps.replaceChildren(...(currentPath || []).map((p, i) => {
-      const li = document.createElement("li");
-      li.textContent = position(p);
-      if (i < currentIndex) { li.className = "done"; li.textContent += " · 已占领"; }
-      else if (i === currentIndex && cur.active) { li.className = "current"; li.textContent += " · 当前目标"; }
-      return li;
-    }));
   }
   function renderSquads(squads, active, routeKey) {
     const list = $("squadList");
@@ -2504,6 +2504,10 @@
 
   // 视图切换：fixed = apk 固定地图（默认） / live = 截图拼接
   let mapViewMode = "";
+  // 这三个只有截图拼接才用得上：固定地图是整张渲染好的图，不需要读视野、
+  // 框选、也不存在「把镜头移过去」这回事。留在工具栏上只会让人误点。
+  const LIVE_ONLY = ["readMap", "regionMode", "syncNow"];
+
   function setMapView(mode) {
     mapViewMode = mode;
     hideFixedTip();                    // 换视图时别把上一个视图的气泡留在屏幕上
@@ -2513,7 +2517,12 @@
     const liveBox = $("mapViewport");
     const btnF = $("viewFixed"), btnL = $("viewLive");
     const hasFixed = Boolean(fixedBox && fixed.loaded && !fixedBox.dataset.unavailable);
-    if (mode === "fixed" && hasFixed) {
+    const useFixed = mode === "fixed" && hasFixed;
+    for (const id of LIVE_ONLY) {
+      const b = $(id);
+      if (b) b.hidden = useFixed;
+    }
+    if (useFixed) {
       fixedBox.hidden = false;
       if (liveBox) liveBox.hidden = true;
       if ($("liveLegend")) $("liveLegend").hidden = true;
