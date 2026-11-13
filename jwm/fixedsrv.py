@@ -67,7 +67,11 @@ def png(path_tail, query):
     y0 = max(0, min(m.h - 1, num("y0", 0)))
     w = max(1, min(m.w - x0, num("w", m.w)))
     h = max(1, min(m.h - y0, num("h", m.h)))
-    scale = max(1, min(8, num("scale", 1)))
+    # 放大倍数放到 48：要能一格格点选。可见格数会随倍数自动变少，
+    # 所以「格数 × 倍数」不会爆，但还是要兜个上限防止有人手改 URL 拖垮进程。
+    scale = max(1, min(48, num("scale", 1)))
+    if w * h * scale * scale > 4000 * 4000:
+        scale = max(1, int((4000 * 4000) / max(1, w * h)) ** 0.5)
     flip = num("flip", 0) != 0
     return fixedmap.render_png(m, region=(x0, y0, x0 + w, y0 + h),
                                scale=scale, flip=flip)

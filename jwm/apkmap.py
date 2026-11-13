@@ -171,6 +171,16 @@ def export_all(apk_path, out_dir, with_decorations=False):
                     json.dump(d, f, ensure_ascii=False)
                 result["decorations"].append({"name": name, "count": d["count"],
                                               "file": os.path.basename(p)})
+        # 装饰 id → icon 的对照表。没有它，decorations_N 里那堆数字没法还原成
+        # 「草/丘/山/湖」，网页就没法按地形上色。体积很小，一起导出。
+        table = {e["id"]: {"icon": e.get("icon"), "type": e.get("type")}
+                 for e in (reader.load("decoration") or []) if "id" in e}
+        if table:
+            p = os.path.join(out_dir, "decoration_table.json")
+            with open(p, "w", encoding="utf-8") as f:
+                json.dump(table, f, ensure_ascii=False)
+            result["decorationTable"] = {"count": len(table),
+                                         "file": os.path.basename(p)}
 
     reader.close()
     return result

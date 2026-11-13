@@ -16,16 +16,18 @@
 import json
 import os
 
-# 地块配色（渲染用）。按资源类型区分，和游戏观感接近，便于对照。
+# 地块配色（渲染用）。按游戏画面取色，不是随便挑的：
+#   地面（lv=1 荒地）在游戏里是**草地绿**，以前画成米色土黄，
+#   整张图看着像撒了一地纸屑，和游戏里对不上。
 PALETTE = {
     "water": (74, 144, 199),       # 海：蓝
-    "grain": (232, 214, 122),      # 粮地：黄
-    "timber": (86, 158, 92),       # 木地：绿
-    "stone": (168, 168, 168),      # 石地：灰
-    "building": (110, 96, 86),     # 建筑占地：深灰褐
-    "decor": (150, 186, 140),      # 地形装饰位：浅绿
-    "empty": (206, 200, 158),     # 荒地：土黄底色
-    "other": (196, 196, 180),      # 其他地形
+    "grain": (232, 214, 122),      # 粮地：浅黄方块
+    "timber": (66, 126, 70),       # 木地：深绿（树冠）
+    "stone": (176, 176, 166),      # 石地：灰白（石头）
+    "building": (120, 96, 86),     # 建筑占地：灰褐
+    "decor": (126, 168, 104),      # 地形装饰位：浅绿
+    "empty": (124, 158, 92),       # 空地：草地绿（游戏底色）
+    "other": (140, 152, 112),      # 其他地形
     "unknown": (255, 0, 255),      # 未知（醒目，方便发现问题）
 }
 
@@ -35,6 +37,23 @@ TYPE_KIND = {3: "grain", 4: "timber", 5: "stone", 6: "building",
 
 # 水面 id（600×600 地图四角都是 71，已实测验证）
 WATER_IDS = frozenset([69, 70, 71] + list(range(631, 663)))
+
+# 装饰物（decorations_N）的五大类，按 icon 前缀分。
+# 阴影（shadow，5 万条）是纯投影，画上去只会把整张图糊成脏灰色，直接丢掉。
+DECO_NONE, DECO_GRASS, DECO_HILL, DECO_MOUNTAIN, DECO_LAKE = 0, 1, 2, 3, 4
+DECO_BY_PREFIX = {"grass": DECO_GRASS, "hill": DECO_HILL,
+                  "mountain": DECO_MOUNTAIN, "lake": DECO_LAKE}
+
+# 装饰色。资源格不换色（资源类型才是要看的），只按地形压一点明暗；
+# 荒地和装饰位则直接照地形上色 —— 这样「成片的林子/山/湖」才看得出来。
+DECO_COLOR = {
+    DECO_GRASS: (108, 148, 92),
+    DECO_HILL: (150, 158, 122),
+    DECO_MOUNTAIN: (128, 130, 122),
+    DECO_LAKE: (86, 152, 196),
+}
+# 资源格上叠地形时乘的系数：山丘下压暗一点，草地提亮一点
+DECO_SHADE = {DECO_GRASS: 1.05, DECO_HILL: 0.93, DECO_MOUNTAIN: 0.86}
 
 MAP_DIR_NAME = "maps"
 
@@ -73,19 +92,28 @@ def land_kind(entry, value):
 class FixedMap:
     """一张固定地图 + land 表，负责查询与渲染。"""
 
-    def __init__(self, name, grid, land_by_id, land_attr=None):
+    def __init__(self, name, grid, land_by_id, land_attr=None, deco=None):
         self.name = name
         self.grid = grid            # 二维 list[list[int]]
         self.h = len(grid)
         self.w = len(grid[0]) if grid else 0
         self.land = land_by_id or {}
         self.land_attr = land_attr or {}
+        self.deco = deco            # 二维 list[list[int]]，装饰大类；没有就是 None
 
     # ---------- 查询 ----------
     def value(self, x, y):
         if not (0 <= x < self.w and 0 <= y < self.h):
             return None
         return self.grid[y][x]
+
+    def deco_at(self, x, y):
+        """这一格的装饰大类（草/丘/山/湖/无）。"""
+        if not self.deco:
+            return DECO_NONE
+        if not (0 <= x < self.w and 0 <= y < self.h):
+            return DECO_NONE
+        return self.deco[y][x]
 
     def kind(self, v):
         """资源类别：water/grain/timber/stone/building/decor/other/unknown。"""
@@ -94,6 +122,34 @@ class FixedMap:
         if v in WATER_IDS:
             return "water"
         return land_kind(self.land.get(v), v)
+
+    def color_at(self, x, y):
+        """一格该画什么颜色（RGB）。
+
+        规则：
+          - 湖（装饰）压过一切：湖里不会是资源地。
+          - 资源格（粮/木/石）保留资源色，只按地形压一点明暗，
+            否则「木地」被草地色盖掉，就分不出哪格能占。
+          - 建筑占地不动（静态建筑，装饰对它没意义）。
+          - 其余（荒地/装饰位/其他）按地形上色，这样成片的林子、山、湖才看得见。
+        """
+        kind = self.kind(self.grid[y][x])
+        base = PALETTE.get(kind, PALETTE["unknown"])
+        d = self.deco_at(x, y)
+        if d == DECO_LAKE:
+            return DECO_COLOR[DECO_LAKE]
+        if kind in ("grain", "timber", "stone"):
+            f = DECO_SHADE.get(d, 1.0)
+            if f == 1.0:
+                return base
+            return (min(255, int(base[0] * f)),
+                    min(255, int(base[1] * f)),
+                    min(255, int(base[2] * f)))
+        if kind == "building":
+            return base
+        if d in DECO_COLOR:
+            return DECO_COLOR[d]
+        return base
 
     def info(self, x, y):
         """一格的全部已知信息（给网页点击显示）。"""
@@ -110,6 +166,7 @@ class FixedMap:
             "yield": {"grain": e.get("cereal", 0),
                       "timber": e.get("timber", 0),
                       "stone": e.get("stone", 0)},
+            "deco": self.deco_at(x, y),
             "hp": attr.get("hp"),
             "size": attr.get("size"),
             "stamina": attr.get("need_stamina"),
@@ -149,13 +206,69 @@ def _load_land_table(apk_reader):
     return land, attr
 
 
-def load_map_from_json(path, land, land_attr):
+def load_decorations(path, w, h, deco_table=None):
+    """把 decorations_N.json 展开成 w×h 的装饰大类矩阵。
+
+    格式：items = [{"start": 格索引, "decoration": 装饰id, "end": 格索引}, ...]
+    格索引 = y * 宽度 + x。
+
+    start / end 是这块装饰在**地图上的两个角**（对角），要先各自拆成 (x, y)
+    再取矩形范围，不能当成「线性区间」直接 range(start, end+1) —— 那样跨行的
+    记录会从行尾铺到下一行行首，整张图会变成一条一条的横条纹。
+
+    阴影类直接跳过（十三万格纯投影，画上去只是把图弄脏）。
+    """
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    items = data.get("items") if isinstance(data, dict) else data
+    if not items:
+        return None
+
+    grid = [[DECO_NONE] * w for _ in range(h)]
+    table = deco_table or {}
+    for rec in items:
+        did = rec.get("decoration")
+        entry = table.get(did) or table.get(str(did))
+        if not entry:
+            continue
+        icon = str(entry.get("icon") or "")
+        code = DECO_BY_PREFIX.get(icon.split("_")[0])
+        if not code:
+            continue                      # shadow 之类，跳过
+        a = rec.get("start")
+        b = rec.get("end")
+        if a is None:
+            continue
+        y1, x1 = divmod(int(a), w)
+        y2, x2 = divmod(int(b if b is not None else a), w)
+        x0_, x1_ = (x1, x2) if x1 <= x2 else (x2, x1)
+        y0_, y1_ = (y1, y2) if y1 <= y2 else (y2, y1)
+        for yy in range(max(0, y0_), min(h, y1_ + 1)):
+            row = grid[yy]
+            for xx in range(max(0, x0_), min(w, x1_ + 1)):
+                row[xx] = code
+    return grid
+
+
+def deco_path_for(map_dir, name):
+    """maps_14 → decorations_14.json"""
+    tail = name.split("_", 1)[-1] if "_" in name else name
+    return os.path.join(map_dir, "decorations_%s.json" % tail)
+
+
+def load_map_from_json(path, land, land_attr, deco=None):
     """从 data/maps/*.json 读一张已导出的地图。"""
     with open(path, encoding="utf-8") as f:
         d = json.load(f)
     if "cells" not in d:
         raise ValueError("%s 不是地图文件" % path)
-    return FixedMap(d.get("name") or os.path.basename(path), d["cells"], land, land_attr)
+    return FixedMap(d.get("name") or os.path.basename(path), d["cells"],
+                    land, land_attr, deco)
 
 
 def load_land_from_apk(apk_path):
@@ -167,16 +280,48 @@ def load_land_from_apk(apk_path):
     return land, attr
 
 
-def load_all(map_dir, apk_path=None, land=None, land_attr=None):
+def load_deco_table(map_dir, apk_path=None):
+    """装饰 id → icon 对照表：优先读导出的 decoration_table.json，没有再去 apk 里取。
+
+    有这个表，decorations_N 里的数字才能还原成「草/丘/山/湖」。
+    两样都没有就返回空表 —— 那就不上地形色，不影响资源显示。
+    """
+    p = os.path.join(map_dir, "decoration_table.json")
+    if os.path.exists(p):
+        try:
+            with open(p, encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict) and data:
+                # JSON 的键一定是字符串，装饰 id 在 decorations_N 里是数字，
+                # 这里统一转回 int，否则一条都对不上（曾经整层装饰全是「无」）
+                return {int(k): v for k, v in data.items()}
+        except (OSError, ValueError):
+            pass
+    if apk_path and os.path.exists(apk_path):
+        try:
+            from .apkmap import ApkReader
+            r = ApkReader(apk_path)
+            table = {e["id"]: {"icon": e.get("icon"), "type": e.get("type")}
+                     for e in (r.load("decoration") or []) if "id" in e}
+            r.close()
+            return table
+        except Exception:
+            return {}
+    return {}
+
+
+def load_all(map_dir, apk_path=None, land=None, land_attr=None, with_decor=True):
     """载入 data/maps 下所有地图。
 
     land 表优先从 apk 读（原始、最全）；apk 不在就退化成「只有类别、没有等级」。
+    with_decor 打开时顺带把装饰层展开进每张地图，网页按地形上色。
     """
     if land is None:
         if apk_path and os.path.exists(apk_path):
             land, land_attr = load_land_from_apk(apk_path)
         else:
             land, land_attr = {}, {}
+    deco_table = load_deco_table(map_dir, apk_path) if with_decor else {}
     out = {}
     if not os.path.isdir(map_dir):
         return out
@@ -184,7 +329,21 @@ def load_all(map_dir, apk_path=None, land=None, land_attr=None):
         if not (fn.startswith("maps_") and fn.endswith(".json")):
             continue
         try:
-            m = load_map_from_json(os.path.join(map_dir, fn), land, land_attr or {})
+            name = fn[:-5]
+            deco = None
+            if deco_table:
+                dpath = deco_path_for(map_dir, name)
+                # 地图多宽得先知道才能把格索引拆成 x/y，所以先读 cells
+                with open(os.path.join(map_dir, fn), encoding="utf-8") as f:
+                    head = json.load(f)
+                cells = head.get("cells") or []
+                w = len(cells[0]) if cells else 0
+                h = len(cells)
+                if w and h:
+                    deco = load_decorations(dpath, w, h, deco_table)
+                m = FixedMap(head.get("name") or name, cells, land, land_attr or {}, deco)
+            else:
+                m = load_map_from_json(os.path.join(map_dir, fn), land, land_attr or {})
         except Exception:
             continue
         out[m.name] = m
@@ -216,10 +375,10 @@ def render_array(fixed, region=None, scale=1, flip=False):
         return img
     for yy in range(h):
         s = y0 + yy                       # 屏幕行
-        row = fixed.grid[fixed.h - 1 - s] if flip else fixed.grid[s]
+        my = fixed.h - 1 - s if flip else s
+        row = img[yy]
         for xx in range(w):
-            kind = fixed.kind(row[x0 + xx])
-            img[yy, xx] = PALETTE.get(kind, PALETTE["unknown"])
+            row[xx] = fixed.color_at(x0 + xx, my)
     if scale > 1:
         img = np.repeat(np.repeat(img, scale, axis=0), scale, axis=1)
     return img

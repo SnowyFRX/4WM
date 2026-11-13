@@ -113,5 +113,63 @@ class GuessTests(unittest.TestCase):
         self.assertIsNone(res["pick"])
 
 
+class DecorationTests(unittest.TestCase):
+    """装饰层：按「两个角」解释区间，且不能盖掉资源色。"""
+
+    def _write(self, items):
+        import json
+        import os
+        import tempfile
+        d = tempfile.mkdtemp()
+        p = os.path.join(d, "decorations_x.json")
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump({"name": "x", "count": len(items), "items": items}, f)
+        return p
+
+    def test_rect_not_linear_span(self):
+        """一条跨行的记录只能铺一个矩形，不能从行尾铺到下一行行首。
+
+        这是实测踩到的坑：按线性 range(start, end) 展开，整张图会变成横条纹。
+        """
+        # 20 宽。start=(2,1) end=(4,2) → 3x2 的矩形，共 6 格
+        p = self._write([{"start": 1 * 20 + 2, "decoration": 6, "end": 2 * 20 + 4}])
+        table = {6: {"icon": "lake_109", "type": 6}}
+        grid = fixedmap.load_decorations(p, 20, 20, table)
+        filled = [(x, y) for y in range(20) for x in range(20) if grid[y][x]]
+        self.assertEqual(len(filled), 6)
+        self.assertTrue(all(2 <= x <= 4 and 1 <= y <= 2 for x, y in filled))
+        # 第 1 行以外的格必须干净
+        self.assertEqual(grid[3].count(0), 20)
+        self.assertEqual(grid[0].count(0), 20)
+
+    def test_shadow_is_skipped(self):
+        p = self._write([{"start": 0, "decoration": 1, "end": 0}])
+        table = {1: {"icon": "shadow_101", "type": 4}}
+        grid = fixedmap.load_decorations(p, 10, 10, table)
+        self.assertEqual(sum(row.count(0) for row in grid), 100)
+
+    def test_lake_overrides_resource(self):
+        m = make_map()
+        m.deco = [[0] * m.w for _ in range(m.h)]
+        m.deco[5][5] = fixedmap.DECO_LAKE
+        self.assertEqual(m.color_at(5, 5), fixedmap.DECO_COLOR[fixedmap.DECO_LAKE])
+
+    def test_resource_keeps_colour(self):
+        """资源格不能被草地/山丘的颜色顶掉，否则分不出哪格能占。"""
+        m = make_map()
+        m.deco = [[fixedmap.DECO_GRASS] * m.w for _ in range(m.h)]
+        c = m.color_at(3, 3)          # (3,3) 是荒地 0 → 该被草地染色
+        self.assertEqual(c, fixedmap.DECO_COLOR[fixedmap.DECO_GRASS])
+        m.grid[3][3] = 1              # 换成粮地
+        c2 = m.color_at(3, 3)
+        self.assertNotEqual(c2, fixedmap.DECO_COLOR[fixedmap.DECO_GRASS])
+        self.assertGreater(c2[0], c2[2])   # 仍然偏黄
+
+    def test_building_ignores_deco(self):
+        m = make_map()
+        m.deco = [[fixedmap.DECO_MOUNTAIN] * m.w for _ in range(m.h)]
+        self.assertEqual(m.color_at(6, 6), PALETTE["building"])
+
+
 if __name__ == "__main__":
     unittest.main()

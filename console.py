@@ -227,9 +227,13 @@ class Handler(BaseHTTPRequestHandler):
                         json.dumps(_snapshot(), ensure_ascii=False).encode())
         elif path.startswith(MAPPFX):
             # 开荒地图页通过 /map/ 前缀整体转发到脚本子服务。
-            # 页面里所有相对请求（state / map/xx / command）都基于 /map/，
-            # 所以这里把它们原样拼接回去，保证页面只认 8765 一个地址。
-            self._proxy_script(path[len(MAPPFX):])
+            # 页面里所有相对请求（state / map/xx / command / fixedimg?x0=..&scale=..）
+            # 都基于 /map/，所以这里把它们原样拼接回去，保证页面只认 8765 一个地址。
+            #
+            # 注意必须用 self.path（带查询串），不能用上面去掉 ?v= 的 path：
+            # 以前这里传的是 path，fixedimg 的 x0/y0/w/h/scale 全被吃掉，
+            # 子服务拿到默认参数，永远渲染「整张图 1px」—— 表现就是地图怎么点都放不大。
+            self._proxy_script(self.path[len(MAPPFX):])
         else:
             self._reply(404, "text/plain", b"")
 
