@@ -121,28 +121,47 @@ class UI:
     @staticmethod
     def brackets(sc):
         """地块选中框的四角括号 → (x1, y1, x2, y2) 或 None。"""
-        a = V.match(sc.img, "bracket_tl", threshold=0.75)
-        b = V.match(sc.img, "bracket_br", threshold=0.75)
+        from . import mapview as mv
+
+        mv.auto_tile_size(sc.img)
+        scale = mv.TILE / 67.5
+        a = V.match(sc.img, "bracket_tl", threshold=0.75, scale=scale)
+        b = V.match(sc.img, "bracket_br", threshold=0.75, scale=scale)
+        home = None
+        if b is None:
+            home = bool(sc.text(r"^进入$") and sc.text(r"^行军$"))
+            if home:
+                b = V.match(sc.img, "bracket_br", threshold=0.70, scale=scale)
         if b is None:
             return None
         x2, y2 = b.x + b.w // 2, b.y + b.h // 2
         if a:
             x1, y1 = a.x - a.w // 2, a.y - a.h // 2
-            if 40 < x2 - x1 < 200 and 40 < y2 - y1 < 200:
+            if 40 < x2 - x1 < 220 and 40 < y2 - y1 < 220:
                 return x1, y1, x2, y2
 
         # 单格靠着主城时，屋檐可能盖住左上角。用其余三个角验证同一选框。
         h, w = sc.img.shape[:2]
         right = (max(0, b.x - 16), max(0, b.y - 80), min(w, b.x + 16), max(0, b.y - 39))
         bottom = (max(0, b.x - 80), max(0, b.y - 16), max(0, b.x - 39), min(h, b.y + 16))
-        top_right = V.match(sc.img, "bracket_br", right, 0.75, flip=0)
-        bottom_left = V.match(sc.img, "bracket_br", bottom, 0.72, flip=1)
-        if not (top_right and bottom_left):
-            return None
-        if (abs(top_right.x - b.x) > 4 or abs(bottom_left.y - b.y) > 4
-                or abs((b.x - bottom_left.x) - (b.y - top_right.y)) > 10):
-            return None
-        return bottom_left.x - bottom_left.w // 2, top_right.y - top_right.h // 2, x2, y2
+        top_right = V.match(sc.img, "bracket_br", right, 0.75, flip=0, scale=scale)
+        bottom_left = V.match(sc.img, "bracket_br", bottom, 0.72, flip=1, scale=scale)
+        if (top_right and bottom_left
+                and abs(top_right.x - b.x) <= 4 * scale
+                and abs(bottom_left.y - b.y) <= 4 * scale
+                and abs((b.x - bottom_left.x) - (b.y - top_right.y)) <= 10 * scale):
+            return bottom_left.x - bottom_left.w // 2, top_right.y - top_right.h // 2, x2, y2
+
+        # 主城标题和建筑会遮住其余三角；右下角的坐标足以还原 2x2 选框。
+        if home is None:
+            home = bool(sc.text(r"^进入$") and sc.text(r"^行军$"))
+        if home:
+            x1 = int(round(x2 - 2 * mv.TILE))
+            y1 = int(round(y2 - 2 * mv.TILE))
+            cx, cy = x1 + mv.TILE, y1 + mv.TILE
+            if x1 >= 0 and y1 >= 250 and x2 <= w and y2 <= 1150 and 120 <= cx <= 600 and cy <= 1000:
+                return x1, y1, x2, y2
+        return None
 
     def has_tile_popup(self, sc):
         """地图上是否开着地块弹窗（有选中框）。"""

@@ -55,6 +55,51 @@ class MapZoomTests(unittest.TestCase):
         self.assertEqual(len(route.frames), 1)
         self.assertEqual(next(iter(route.frames.values()))[1], b"second")
 
+    def test_multiple_borders_measure_zoom_and_reject_outliers(self):
+        import cv2
+        import numpy as np
+
+        img = np.full((540, 720, 3), (140, 180, 90), dtype=np.uint8)
+        color = tuple(int(v) for v in mapview.GREEN_BGR)
+        for x in range(23, 720, 81):
+            cv2.line(img, (x, 40), (x, 520), color, 2)
+        for y in range(31, 540, 81):
+            cv2.line(img, (10, y), (700, y), color, 2)
+        for x in (102, 184):
+            cv2.line(img, (x, 90), (x, 180), color, 2)
+
+        self.assertEqual(mapview.estimate_tile_size(img), 81.0)
+        mapview.set_tile_size(67.5)
+        phase = mapview.estimate_phase(img)
+        self.assertEqual(mapview.TILE, 81.0)
+        self.assertLess(abs(phase[0] - 23), 1)
+        self.assertLess(abs(phase[1] - 31), 1)
+
+    def test_template_matching_uses_zoom_scale(self):
+        import cv2
+        import numpy as np
+        from jwm import vision
+
+        tpl = np.arange(12 * 12 * 3, dtype=np.uint8).reshape(12, 12, 3)
+        scaled = cv2.resize(tpl, (18, 18), interpolation=cv2.INTER_NEAREST)
+        img = np.zeros((100, 120, 3), dtype=np.uint8)
+        img[40:58, 50:68] = scaled
+        with patch.dict(vision._tpl_cache, {"zoom_probe": (tpl, None)}):
+            match = vision.match(img, "zoom_probe", threshold=0.99, scale=1.5)
+        self.assertEqual((match.x, match.y, match.w, match.h), (59, 49, 18, 18))
+
+    def test_home_popup_recovers_two_by_two_selection_from_corner(self):
+        import numpy as np
+        from jwm.ui import UI
+        from jwm.vision import Match
+
+        mapview.set_tile_size(81)
+        screen = SimpleNamespace(img=np.zeros((1280, 720, 3), dtype=np.uint8))
+        screen.text = lambda pattern: object() if pattern in (r"^进入$", r"^行军$") else None
+        corner = Match(x=426, y=841, score=0.8, w=24, h=24)
+        with patch("jwm.ui.V.match", side_effect=[None, corner, None, None]):
+            self.assertEqual(UI.brackets(screen), (276, 691, 438, 853))
+
 
 class RecruitReceiptTests(unittest.TestCase):
     def make_recruit(self, after):

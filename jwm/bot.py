@@ -201,6 +201,25 @@ class Bot:
             except Exception:
                 pass
 
+    def resume_reset(self):
+        """从暂停里回来：把 adb 连接和游戏界面都拉回脚本假设的样子。
+
+        暂停期间用户可能进了建筑详情、编队面板，甚至把游戏切到后台；
+        脚本要是直接接着干，就会按「现在正停在大地图」的假设去点，
+        结果点歪、等不到预期画面、一路超时 —— 手感就是「恢复后特别迟钝」。
+        恢复后先重建 adb 连接（空闲过的管道第一条命令容易超时），
+        再把界面拉回大地图，然后才允许进入任务。
+        """
+        log.info("恢复后先复位：重建 adb 连接、回到大地图")
+        try:
+            self.dev.reset_link()
+        except Exception:
+            log.debug("重建 adb 连接失败", exc_info=True)
+        try:
+            self.ui.to_map()
+        except Exception:
+            log.warning("恢复后没能回到大地图，下一轮任务会再试", exc_info=True)
+
     def loop(self):
         sched = self.cfg.get("schedule", {})
         intervals = sched.get("intervals", {})
@@ -212,6 +231,7 @@ class Bot:
             if pause.paused():
                 self.phase("脚本已暂停，模拟器交给你手动操作", "idle", "paused")
                 pause.wait()
+                self.resume_reset()
                 self.phase("已恢复，继续按计划执行", "idle", "running")
             # 地图扫描是有状态的慢活（要回城、拖镜头、拼图），一旦开始就做完，
             # 不再像以前那样在每个任务前插一次、把一次扫描切成几段（那样看起来在做一半就跑去干别的）。

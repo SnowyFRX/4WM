@@ -15,7 +15,7 @@ from .vision import ROOT, imread
 
 log = logging.getLogger(__name__)
 
-TILE = 67.5  # 720x1280 下默认缩放的格子边长；每次校准主城时按实际选框更新
+TILE = 67.5  # 720x1280 下默认缩放的格子边长；按领地边线和主城选框实测更新
 MIN_TILE, MAX_TILE = 40.0, 110.0
 GREEN_BGR = np.array([77, 132, 54])  # 自己领地边界线颜色
 
@@ -153,8 +153,7 @@ def green_mask(img, tol=40):
     return d < tol
 
 
-def estimate_phase(img):
-    """用自己领地的绿色边界线估计网格相位 (ox, oy)，找不到返回 None。"""
+def _line_centers(img):
     m = green_mask(img)
     cols = m.sum(axis=0)
     rows = m.sum(axis=1)
@@ -173,16 +172,59 @@ def estimate_phase(img):
         groups.append(cur)
         return [(g[0] + g[-1]) / 2.0 for g in groups if len(g) <= 6]
 
-    vx = runs(cols, 40)
-    hy = runs(rows, 40)
+    return runs(cols, 40), runs(rows, 40)
+
+
+def estimate_tile_size(img):
+    """由多条领地边线的间距估计格宽；证据不足时返回 None。"""
+    distances = []
+    for centers in _line_centers(img):
+        distances.append(np.array([b - a for i, a in enumerate(centers)
+                                   for b in centers[i + 1:]], dtype=float))
+    best = None
+    for tile in np.arange(MIN_TILE, MAX_TILE + 0.01, 0.5):
+        direct = multiple = 0
+        for values in distances:
+            if not len(values):
+                continue
+            direct += int(np.count_nonzero(np.abs(values - tile) <= max(3.0, tile * 0.055)))
+            count = np.maximum(1, np.rint(values / tile))
+            multiple += int(np.count_nonzero((count <= 6) &
+                    (np.abs(values - count * tile) <= max(2.5, tile * 0.035))))
+        score = (direct, multiple)
+        if best is None or score > best[0]:
+            best = score, float(tile)
+    if best is None or best[0][0] < 2 or best[0][1] < 6:
+        return None
+    return best[1]
+
+
+def auto_tile_size(img):
+    measured = estimate_tile_size(img)
+    if measured is not None and abs(measured - TILE) >= 2.0:
+        previous = TILE
+        set_tile_size(measured)
+        log.info("检测到地图缩放：格宽 %.1f → %.1f", previous, TILE)
+    return TILE
+
+
+def estimate_phase(img):
+    """用自己领地的绿色边界线估计网格相位 (ox, oy)，找不到返回 None。"""
+    auto_tile_size(img)
+    vx, hy = _line_centers(img)
     if not vx or not hy:
         return None
 
     def phase(centers):
-        # 线在格子内侧 ~2px，左右两侧边界各偏一边；取圆周均值
-        ang = np.array([(c % TILE) / TILE * 2 * np.pi for c in centers])
-        mean = np.arctan2(np.sin(ang).mean(), np.cos(ang).mean())
-        return (mean / (2 * np.pi) * TILE) % TILE
+        tolerance = max(2.5, TILE * 0.06)
+        best = None
+        for seed in centers:
+            residuals = [((c - seed + TILE / 2) % TILE) - TILE / 2 for c in centers]
+            inliers = [r for r in residuals if abs(r) <= tolerance]
+            score = (len(inliers), -sum(abs(r) for r in inliers))
+            if best is None or score > best[0]:
+                best = score, seed + sum(inliers) / len(inliers)
+        return best[1] % TILE
 
     return phase(vx), phase(hy)
 

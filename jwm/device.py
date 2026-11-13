@@ -275,6 +275,20 @@ class Device:
     # 截图/查询不在此列：只读，不干扰用户，网页还要靠它显示画面。
     _MOTION_PREFIXES = ("input ", "monkey ", "am force-stop")
 
+    def reset_link(self):
+        """丢掉常驻 adb shell，下次执行命令时重建。
+
+        暂停几十秒后这条管道一直空着，恢复时第一条命令容易超时，
+        然后「超时→重建→再超时」，表现就是恢复后特别迟钝。
+        主动扔掉反而更快。
+        """
+        if self.sh is not None:
+            try:
+                self.sh.close()
+            except Exception:
+                pass
+            self.sh = None
+
     def shell(self, cmd, timeout=30):
         """执行一条 shell 命令。优先常驻 shell，坏了就重建，重建不了退回一次性调用。
 
@@ -338,6 +352,16 @@ class Device:
 
     def screenshot(self):
         """返回 720x1280 的 BGR 图像 (numpy)。"""
+        # 暂停期间不再截图：screencap 是重操作，每秒来一次会跟用户自己点屏幕
+        # 抢 adb 通道，手感就是「脚本暂停了，但操作还是卡」。
+        # 直接返回上一帧：上层最多拿旧帧做一次无效判断，不会崩，也不吵用户。
+        from . import pause as pause_gate
+        if pause_gate.paused():
+            if self.last is not None:
+                return self.last
+            pause_gate.wait(2.0)
+            if self.last is not None:
+                return self.last
         img = None
         if self.console is not None:
             try:

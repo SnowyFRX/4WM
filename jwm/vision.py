@@ -51,9 +51,16 @@ class Match:
         return self.x, self.y
 
 
-def match(img, name, region=None, threshold=0.85, *, flip=None):
+def match(img, name, region=None, threshold=0.85, *, flip=None, scale=1.0):
     """在 img 的 region=(x1,y1,x2,y2) 内找模板，返回最佳 Match 或 None。"""
+    if scale <= 0:
+        raise ValueError("模板缩放比例必须大于 0")
     tpl, mask = template(name)
+    if scale != 1.0:
+        size = (max(1, round(tpl.shape[1] * scale)), max(1, round(tpl.shape[0] * scale)))
+        tpl = cv2.resize(tpl, size, interpolation=cv2.INTER_NEAREST)
+        if mask is not None:
+            mask = cv2.resize(mask, size, interpolation=cv2.INTER_NEAREST)
     if flip is not None:
         tpl = cv2.flip(tpl, flip)
         if mask is not None:
