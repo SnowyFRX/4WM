@@ -3,6 +3,9 @@
 坐标约定：
   - 屏幕网格 (i, j)：第 i 列、第 j 行，左上角像素 = (ox + i*TILE, oy + j*TILE)
   - 游戏坐标 (x, y)：x 向右增大，y 向上增大（弹窗里显示的 (25,24) 这种）
+
+识别核心（颜色掩膜 / 形态学 / 轮廓 / 霍夫 / 网格拟合）在 `gridvision`，
+这里只负责业务：把网格参数套到格子上、认领地、分类资源、算边界。
 """
 import logging
 import os
@@ -11,13 +14,19 @@ from dataclasses import dataclass, field
 import cv2
 import numpy as np
 
+from . import gridvision
 from .vision import ROOT, imread
 
 log = logging.getLogger(__name__)
 
 TILE = 67.5  # 720x1280 下默认缩放的格子边长；按领地边线和主城选框实测更新
 MIN_TILE, MAX_TILE = 40.0, 110.0
-GREEN_BGR = np.array([77, 132, 54])  # 自己领地边界线颜色
+GREEN_BGR = np.array([77, 132, 54])  # 自己领地边界线颜色（只在 HSV 失效时兜底）
+
+# 一次缩放允许的格宽变化幅度。拖一次滚轮缩放不会有 1.8 倍这种跳变，
+# 出现就说明认错了（典型是「半格歧义」把 54 认成 108 或反过来），
+# 这时宁可不动 TILE —— 主城选框（2x2 的 span/2）下一帧会给出准确值。
+TILE_BAND = (0.70, 1.40)
 
 
 def set_tile_size(value):
@@ -149,84 +158,74 @@ def bank():
 
 
 def green_mask(img, tol=40):
-    d = np.abs(img.astype(np.int16) - GREEN_BGR.astype(np.int16)).sum(axis=2)
-    return d < tol
+    """领界线掩膜（bool 数组）。
+
+    主路径是 `gridvision.line_mask`：先量出地面 HSV 主色，再按
+    「饱和度更高 + 更暗」做相对过滤，换季换光照都不用改参数。
+
+    兜底：极少数皮肤下（比如夜里、滤镜）掩膜几乎全空，此时退回旧的
+    BGR 距离。留着它不是为了效果，是为了「至少还能认出一点」，
+    别让整张地图直接罢工。
+    """
+    m = gridvision.line_mask(img)
+    if cv2.countNonZero(m) < m.size * 5e-4:
+        log.warning("HSV 掩膜几乎为空（皮肤/光照异常），退回 BGR 距离阈值")
+        d = np.abs(img.astype(np.int16) - GREEN_BGR.astype(np.int16)).sum(axis=2)
+        m = np.where(d < tol, 255, 0).astype(np.uint8)
+    return gridvision.clean_mask(m) > 0
 
 
 def _line_centers(img):
-    m = green_mask(img)
-    cols = m.sum(axis=0)
-    rows = m.sum(axis=1)
+    """竖线/横线的像素位置（调试用；拟合已经把这一步含在 guess 里了）。"""
+    m = gridvision.clean_mask(gridvision.line_mask(img))
+    return gridvision.line_positions(m)
 
-    def runs(arr, min_len):
-        idx = np.nonzero(arr >= min_len)[0]
-        if len(idx) == 0:
-            return []
-        groups, cur = [], [idx[0]]
-        for v in idx[1:]:
-            if v - cur[-1] <= 1:
-                cur.append(v)
-            else:
-                groups.append(cur)
-                cur = [v]
-        groups.append(cur)
-        return [(g[0] + g[-1]) / 2.0 for g in groups if len(g) <= 6]
 
-    return runs(cols, 40), runs(rows, 40)
+def _guess(img):
+    """整帧的网格估计（格宽 + 相位），把 TILE 当先验传进去。"""
+    return gridvision.guess(img, prior=TILE)
 
 
 def estimate_tile_size(img):
-    """由多条领地边线的间距估计格宽；证据不足时返回 None。"""
-    distances = []
-    for centers in _line_centers(img):
-        distances.append(np.array([b - a for i, a in enumerate(centers)
-                                   for b in centers[i + 1:]], dtype=float))
-    best = None
-    for tile in np.arange(MIN_TILE, MAX_TILE + 0.01, 0.5):
-        direct = multiple = 0
-        for values in distances:
-            if not len(values):
-                continue
-            direct += int(np.count_nonzero(np.abs(values - tile) <= max(3.0, tile * 0.055)))
-            count = np.maximum(1, np.rint(values / tile))
-            multiple += int(np.count_nonzero((count <= 6) &
-                    (np.abs(values - count * tile) <= max(2.5, tile * 0.035))))
-        score = (direct, multiple)
-        if best is None or score > best[0]:
-            best = score, float(tile)
-    if best is None or best[0][0] < 2 or best[0][1] < 6:
-        return None
-    return best[1]
+    """估计当前缩放下的格宽；证据不足返回 None。"""
+    g = _guess(img)
+    return g.tile if g else None
 
 
-def auto_tile_size(img):
-    measured = estimate_tile_size(img)
-    if measured is not None and abs(measured - TILE) >= 2.0:
-        previous = TILE
-        set_tile_size(measured)
-        log.info("检测到地图缩放：格宽 %.1f → %.1f", previous, TILE)
+def auto_tile_size(img, guess=None):
+    """检测到缩放就更新 TILE。
+
+    只有「变化幅度合理」才采纳：一次变焦不可能让格宽跳到 1.8 倍，
+    这种跳变基本都是半格歧义（54 ↔ 108）认错了。认错时宁可保持原值 ——
+    主城选框（2x2 的 span/2）下一次校准会给出准确格宽。
+    """
+    g = guess if guess is not None else _guess(img)
+    measured = g.tile if g else None
+    if measured is None or abs(measured - TILE) < 2.0:
+        return TILE
+    ratio = measured / TILE
+    if not TILE_BAND[0] <= ratio <= TILE_BAND[1]:
+        log.warning("格宽估计 %.1f 与当前 %.1f 相差 %.0f%%，像认错了，先不改",
+                    measured, TILE, (ratio - 1) * 100)
+        return TILE
+    previous = TILE
+    set_tile_size(measured)
+    log.info("检测到地图缩放：格宽 %.1f → %.1f", previous, TILE)
     return TILE
 
 
-def estimate_phase(img):
-    """用自己领地的绿色边界线估计网格相位 (ox, oy)，找不到返回 None。"""
-    auto_tile_size(img)
-    vx, hy = _line_centers(img)
-    if not vx or not hy:
+def estimate_phase(img, guess=None):
+    """估计网格相位 (ox, oy)，找不到返回 None。
+
+    相位是「模格宽」的，所以格宽必须和 TILE 一致才谈得上相位。自动变焦
+    被 TILE_BAND 拦下时（说明这次估计八成是半格歧义），这里直接返回 None ——
+    拿一个模 108 的相位去排 54 的格子，点哪都歪，不如什么都不做。
+    """
+    g = guess if guess is not None else _guess(img)
+    auto_tile_size(img, g)
+    if not g or abs(g.tile - TILE) > 0.5:
         return None
-
-    def phase(centers):
-        tolerance = max(2.5, TILE * 0.06)
-        best = None
-        for seed in centers:
-            residuals = [((c - seed + TILE / 2) % TILE) - TILE / 2 for c in centers]
-            inliers = [r for r in residuals if abs(r) <= tolerance]
-            score = (len(inliers), -sum(abs(r) for r in inliers))
-            if best is None or score > best[0]:
-                best = score, seed + sum(inliers) / len(inliers)
-        return best[1] % TILE
-
-    return phase(vx), phase(hy)
+    return g.ox, g.oy
 
 
 def in_ui(x, y, w=TILE, h=TILE):
@@ -241,12 +240,16 @@ class MapGrid:
 
     def __init__(self, img, phase=None, classify=True, seasons=None):
         self.img = img
-        ph = phase or estimate_phase(img)
-        if ph is None:
+        self._gm = None      # 掩膜只算一次：变焦 + 领地泛洪共用
+        if phase is None:
+            self._gm = green_mask(img)
+            guess = gridvision.guess(img, mask=self._gm.astype(np.uint8) * 255, prior=TILE)
+            phase = estimate_phase(img, guess=guess)
+        if phase is None:
             raise ValueError("画面里没有找到自己领地的边界线")
         # 起点取到屏幕左上外一格
-        self.ox = ph[0] - TILE
-        self.oy = ph[1] - TILE
+        self.ox = phase[0] - TILE
+        self.oy = phase[1] - TILE
         H, W = img.shape[:2]
         self.cols = int((W - self.ox) // TILE) + 1
         self.rows = int((H - self.oy) // TILE) + 1
@@ -315,7 +318,7 @@ class MapGrid:
         return float(rows.mean() + max(0, y1) - ey)
 
     def _flood_owned(self):
-        gm = green_mask(self.img)
+        gm = self._gm if self._gm is not None else green_mask(self.img)
         line = {}  # (k1, k2) -> 偏移或 None
         seeds, outside = set(), set()
         rv = {k: self._ring_v(t) for k, t in self.tiles.items()}
