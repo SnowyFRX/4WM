@@ -263,7 +263,7 @@
   #fixedCanvas {
     display: block; width: 100%; height: clamp(380px, 68vh, 740px);
     cursor: grab; touch-action: none;
-    background: #2b3a4a;
+    background: #7c9e5c;
     border-radius: var(--r-sm);
     image-rendering: pixelated;
   }
@@ -1956,7 +1956,7 @@
     const x0 = Math.max(0, Math.floor(fixed.view.x));
     const y0 = Math.max(0, Math.floor(fixed.view.y));
 
-    ctx.fillStyle = "#2b3a4a";
+    ctx.fillStyle = "#7c9e5c";   // 草地绿：图还没到时露出来也不突兀
     ctx.fillRect(0, 0, c.width, c.height);
 
     const meta = fixedMapMeta(fixed.name);
@@ -1977,11 +1977,13 @@
   }
 
   // 视口内的格子用后端渲染好的 PNG（比前端逐格快得多）
-  const fixedImg = { key: "", img: null, x0: 0, y0: 0, w: 0, h: 0, loading: false };
+  const fixedImg = { key: "", img: null, x0: 0, y0: 0, w: 0, h: 0, loading: false, seq: 0 };
 
   function fixedPaintViewport(ctx, x0, y0, cols, rows, tilePx) {
-    // 请求范围留一点余量，拖动时不至于频繁重取
-    const padCells = 20;
+    // 请求范围留足余量：拖十几格都不用重新取图。
+    // 以前只留 20 格，一拖就重新请求，请求期间旧图被丢掉，
+    // 画布只剩深色底 + 网格 + 叠加层 —— 看着像地图没了。
+    const padCells = 48;
     const reqX = Math.max(0, x0 - padCells);
     const reqY = Math.max(0, y0 - padCells);
     const reqW = Math.min(fixed.w - reqX, cols + padCells * 2);
@@ -1991,8 +1993,10 @@
 
     if (fixedImg.key !== key && !fixedImg.loading) {
       fixedImg.loading = true;
+      const seq = ++fixedImg.seq;
       const img = new Image();
       img.onload = () => {
+        if (seq !== fixedImg.seq) return;      // 拖太快时的过期响应，直接丢掉
         fixedImg.key = key;
         fixedImg.img = img;
         fixedImg.x0 = reqX; fixedImg.y0 = reqY;
@@ -2000,13 +2004,14 @@
         fixedImg.loading = false;
         fixedDraw();
       };
-      img.onerror = () => { fixedImg.loading = false; };
+      img.onerror = () => { if (seq === fixedImg.seq) fixedImg.loading = false; };
       img.src = `fixedimg/${fixed.name}?x0=${reqX}&y0=${reqY}&w=${reqW}&h=${reqH}`
               + `&scale=${fixed.scale}&flip=${flip}`;
     }
 
-    if (fixedImg.img && fixedImg.key === key) {
-      // 图片是按屏幕行序渲染的，直接按视图偏移贴上去
+    // 只要有图就先画上：新图没到之前用旧图顶着（位置按当前视图算），
+    // 拖动过程中最多边缘露一点底色，不会整片空白
+    if (fixedImg.img) {
       const dx = (fixedImg.x0 - fixed.view.x) * tilePx;
       const dy = (fixedImg.y0 - fixed.view.y) * tilePx;
       ctx.imageSmoothingEnabled = false;
