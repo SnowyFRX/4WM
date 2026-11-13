@@ -262,7 +262,8 @@
   }
   #fixedCanvas {
     display: block; width: 100%; height: clamp(380px, 68vh, 740px);
-    cursor: grab; touch-action: none;
+    /* 光标用十字：这张图是用来点格子的，不是用来拖的 */
+    cursor: crosshair; touch-action: none;
     background: #7c9e5c;
     border-radius: var(--r-sm);
     image-rendering: pixelated;
@@ -2210,6 +2211,18 @@
     };
   }
 
+  // 鼠标是否还在画布上。详情是异步请求的，回来时鼠标可能早就走了，
+  // 那时不能再把气泡弹出来 —— 否则「移出地图气泡不消失」的根就在这儿。
+  let fixedPointerInside = false;
+
+  // 收起详情气泡。鼠标挪出画布、开始拖动、切视图、滚页面时要调它。
+  // 只靠 canvas 的 mouseleave 不够：画布四周还有留白，鼠标从留白走出去、
+  // 或者拖到一半松手，气泡就一直挂在那儿不消失。
+  function hideFixedTip() {
+    const tip = $("fixedTip");
+    if (tip && !tip.hidden) tip.hidden = true;
+  }
+
   let fixedHover = { at: 0, cell: "" };
 
   async function fixedShowTile(clientX, clientY) {
@@ -2230,6 +2243,8 @@
                             { cache: "no-store" });
       if (!r.ok) { tip.hidden = true; return; }
       const t = await r.json();
+      // 请求期间鼠标可能已经离开画布 / 移到别的格：这时别再弹气泡
+      if (!fixedPointerInside || fixedHover.cell !== mark) return;
       const y = t.yield || {};
       const decoName = { 0: "", 1: "草地", 2: "小丘", 3: "山体", 4: "湖泊" }[t.deco] || "";
       const lines = [
@@ -2323,6 +2338,7 @@
     if (!c) return;
 
     c.addEventListener("mousedown", e => {
+      hideFixedTip();
       fixed.drag = { x: e.clientX, y: e.clientY, vx: fixed.view.x, vy: fixed.view.y,
                      moved: false };
       c.classList.add("dragging");
@@ -2355,12 +2371,9 @@
       if (changed) fixedDraw();          // 悬停框跟着鼠标走
       fixedShowTile(e.clientX, e.clientY);
     });
-    c.addEventListener("mouseleave", () => {
-      $("fixedTip").hidden = true;
-      if (fixedHoverCell) { fixedHoverCell = null; fixedDraw(); }
-    });
     c.addEventListener("wheel", e => {
       e.preventDefault();
+      hideFixedTip();                    // 缩放时格子含义变了，旧气泡先收掉
       const r = c.getBoundingClientRect();
       const before = fixedCellAt(e.clientX, e.clientY);
       const steps = [2, 4, 6, 10, 16, 24, 32];
@@ -2402,6 +2415,20 @@
     $("viewFixed")?.addEventListener("click", () => setMapView("fixed"));
     $("viewLive")?.addEventListener("click", () => setMapView("live"));
     window.addEventListener("resize", () => { fixedResize(); fixedDraw(); });
+
+    // 兜底：只要鼠标不在画布矩形里（挪到留白、侧栏、浏览器外），就把气泡收掉。
+    // 光靠 canvas 的 mouseleave 在留白和拖拽结束时不触发，气泡会一直挂着。
+    document.addEventListener("mousemove", e => {
+      const r = c.getBoundingClientRect();
+      const inside = e.clientX >= r.left && e.clientX <= r.right
+                  && e.clientY >= r.top && e.clientY <= r.bottom;
+      fixedPointerInside = inside;
+      if (inside) return;
+      hideFixedTip();
+      if (fixedHoverCell) { fixedHoverCell = null; fixedDraw(); }
+    });
+    document.addEventListener("scroll", () => hideFixedTip(), true);
+    window.addEventListener("blur", () => { fixedPointerInside = false; hideFixedTip(); });
   }
 
   async function initFixedMap() {
@@ -2429,6 +2456,7 @@
   let mapViewMode = "";
   function setMapView(mode) {
     mapViewMode = mode;
+    hideFixedTip();                    // 换视图时别把上一个视图的气泡留在屏幕上
     const fixedBox = $("fullmapBox");
     // 注意：以前这里写的是 $("mapPage .viewport")，而 $ 是 getElementById，
     // 永远返回 null —— 于是实时视野的老地图从来不隐藏，两个视图上下叠在一起。
