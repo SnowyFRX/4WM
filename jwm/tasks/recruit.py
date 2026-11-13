@@ -1,4 +1,4 @@
-"""兵营招兵：给在主城、未满员的编队补兵；都在外面时新建编队。
+"""兵营招兵：只执行用户在网页队列里明确安排的招兵（编队/兵种/数量都由你定）；队列为空不自动造兵。
 
 实测规律：
   - 只能给在主城的编队招兵，标着“外出”的编队招募按钮是灰的；
@@ -381,121 +381,10 @@ class Recruit:
 
     def run(self):
         self.resource_shortage = False
-        if self.bot.operations:
-            job = self.bot.operations.head("recruit")
-            if not job:
-                return 0
-            if not self.bot.operations.guard_ready("recruit"):
-                return 0  # 资源不足冷却中，不硬试
-            return self.queued_recruit(job)
-        per_army = self.cfg.get("max_per_army", 9)
-        melee_count = self.cfg.get("melee_count", 2)
-        melee_slot = self.cfg.get("melee_slot", 1)
-        ranged_slot = self.cfg.get("ranged_slot", self.cfg.get("soldier_slot", 2))
-        focus = self.cfg.get("focus_slot")
-
-        def want_slot(index):
-            # 前 melee_count 支编队造近战，其余造远程；focus_slot 非空则一律用它（你指定重点兵种）
-            if focus:
-                return focus
-            return melee_slot if index < melee_count else ranged_slot
-
-        sc = self.open_barracks()
-        if sc is None:
-            log.info("没找到兵营")
-            self.ui.to_map()
+        ops = self.bot.operations
+        if not ops:
             return 0
-        self.queue_full = False
-        cards, sc = self.all_cards(sc)
-        unlocked = {s for s in range(1, 6) if self.is_unlocked(sc.img, s)}
-        if not unlocked:
-            log.info("没有已解锁的兵种，跳过招兵")
-            self.ui.to_map()
+        job = ops.head("recruit")
+        if not job or not ops.guard_ready("recruit"):
             return 0
-        total = 0
-        understrength = []
-        cap = None
-        for name, (nb, have, away) in sorted(cards.items(), key=lambda kv: kv[1][1]):
-            sc = self.select(name)
-            if sc is None:
-                continue
-            c = self.capacity(sc.img)
-            if c:
-                have, cap = c
-            limit = min(per_army, cap or per_army)
-            if have >= limit:
-                continue
-            if away:
-                understrength.append(name)  # 在外面没法补，记下来让开荒任务召回
-                continue
-            if not self.queue_full and not self.resource_shortage:
-                ws = want_slot(self._index(name))
-                if ws in unlocked:
-                    total += self.fill(name, ws)
-                else:
-                    log.info("%s 想招的兵种(槽%d)还没解锁，跳过", name, ws)
-        # 还有编队名额就新建编队（但想造的兵种没解锁就留空位，不硬造别的兵种）
-        slots = self.army_slots(self.ui.grab())
-        while (self.cfg.get("create_armies", True) and slots and slots[0] < slots[1]
-               and not self.queue_full and not self.resource_shortage):
-            ws = want_slot(slots[0])  # 新队序号 = 当前已有队数
-            if ws not in unlocked:
-                log.info("第%d支编队想造的兵种(槽%d)还没解锁，留空位等你解锁", slots[0] + 1, ws)
-                break
-            log.info("新建一支编队 (%d/%d)", *slots)
-            self.dev.swipe(250, 368, 650, 368, 400, delay=0.8)  # “+” 在最左边
-            self.dev.tap(132, 368, delay=1.0)
-            if not self.ui.tap_text(self.ui.grab(), r"^创建$", delay=1.2):
-                break
-            n = self.fill("新编队", ws)
-            total += n
-            new_slots = self.army_slots(self.ui.grab())
-            if not n or new_slots == slots:
-                break
-            slots = new_slots
-        # 在外面的缺员编队：先调回主城（只能给在主城的编队招兵），到了再补满
-        # 注意：正在战斗/行军中的绝不召回 —— 那是打断出征，不是补兵。
-        if understrength and not self.queue_full:
-            busy = set(self.bot.expand._busy_armies())
-            hold = [n for n in understrength if n in busy]
-            understrength = [n for n in understrength if n not in busy]
-            if hold:
-                log.info("这些编队正在战斗/行军，先不召回补兵：%s", "、".join(hold))
-        if understrength and not self.queue_full:
-            log.info("在外面缺员且空闲的编队：%s，调回主城补兵", "、".join(understrength))
-            self.ui.to_map()
-            back = self.bot.expand.recall(names=understrength)
-            wait_max = self.cfg.get("recall_wait_max", 90)
-            near = [(n, s) for n, s in back if s <= wait_max]
-            if near:
-                wait = max(s for _, s in near) + 3
-                log.info("等编队回城 %d 秒", wait)
-                time.sleep(wait)
-                if self.open_barracks() is not None:
-                    for name, _ in near:
-                        sc = self.select(name)
-                        if sc is None:
-                            continue
-                        c = self.capacity(sc.img)
-                        if c and c[0] >= min(per_army, c[1]):
-                            continue
-                        if self._away(sc, name):
-                            log.info("%s 还没回到主城，下次再补", name)
-                            continue
-                        ws = want_slot(self._index(name))
-                        if ws in unlocked:
-                            total += self.fill(name, ws)
-                        if name in understrength:
-                            understrength.remove(name)
-            # 太远的（行军超过 recall_wait_max）下次招兵时再补
-        self.bot.state.data["understrength"] = understrength
-        self.bot.state.save()
-        if total:
-            self.bot.state.inc("recruited", total)
-            k = self.bot.state.reset_hard()
-            if k:
-                log.info("兵力增加，%d 块之前打不动的地允许重试", k)
-        elif not understrength:
-            log.info("没有需要补兵的编队")
-        self.ui.to_map()
-        return total
+        return self.queued_recruit(job)

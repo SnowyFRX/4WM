@@ -1,7 +1,7 @@
 """领取各编队背包里的宝箱（士兵阵亡宝箱会丢，要及时领）。
 
 - 军队按钮右上角出现金色宝箱角标 = 有宝箱可领，主循环随时检查，一出现就领；
-- 领取时如果提示“库房容量不足”，点“升级仓库/升级粮仓”直接升级，绝不点“继续领取”（会丢资源）。
+- 领取时如果提示“库房容量不足”，暂停领取、等用户在网页队列安排仓库/粮仓升级，绝不点“继续领取”（会丢资源），也不自动升级。
 """
 import logging
 import time
@@ -127,23 +127,10 @@ class Chests:
         return n, False
 
     def _storage_full(self, sc):
-        """库房满：去升级仓库/粮仓。返回 True 表示本轮停止领宝箱。"""
+        """库房满：不自动升级，等用户在网页队列里安排仓库/粮仓升级。返回 True 表示本轮停止领宝箱。"""
         b = sc.text(r"^升级(仓库|粮仓)")
-        if not b:
-            log.warning("库房容量不足，但没找到升级按钮")
-            self.blocked_until = time.time() + 300
-            return True
-        what = "粮仓" if "粮仓" in b.text else "仓库"
-        if self.bot.operations:
-            log.info("%s已满，等待网页建筑升级队列处理", what)
-            self.blocked_until = time.time() + 300
-            self.ui.close(sc)
-            return True
-        log.info("领宝箱时%s满了，去升级%s", what, what)
-        self.dev.tap(*b.center, delay=1.5)
-        if self.bot.build.upgrade_open_panel(what):
-            log.info("开始升级 %s", what)
-        else:
-            log.info("%s 现在升级不了（施工队列忙或资源不足），5 分钟后再领宝箱", what)
-            self.blocked_until = time.time() + 300
+        what = ("粮仓" if "粮仓" in b.text else "仓库") if b else "仓库/粮仓"
+        log.info("%s已满，等待网页建筑升级队列处理（不自动升级）", what)
+        self.blocked_until = time.time() + 300
+        self.ui.close(sc)
         return True

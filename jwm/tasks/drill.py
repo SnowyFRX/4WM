@@ -7,7 +7,7 @@
   - 兵营等级不够时，升级效果那里写“需要兵营15级”，而且“训练”按钮根本不出现。
 
 所以“训练一支编队”= 逐个点它的每个兵、能训的就训一个，而不是只点第一个。
-训练顺序由你定（config 的 drill.priority），**只训你填进去的编队**，没填就一个都不训。
+只执行用户在网页队列里明确安排的练兵（编队/兵种/数量都由你定）；队列为空一个都不训，也不自动召回编队。
 """
 import logging
 import re
@@ -298,7 +298,7 @@ class Drill:
                 parts.append(t)
         return " / ".join(dict.fromkeys(parts))
 
-    def train_soldier(self, x):
+    def train_soldier(self, x, approve=None):
         """选中第 x 个兵并训练。返回 (ok, 说明)。"""
         self.dev.tap(x, AVATAR_Y, delay=0.6)
         sc = self.ui.grab()
@@ -329,7 +329,12 @@ class Drill:
             log.info("    兵@%d 资源不够，先不点：%s（现有 %s）", x, "、".join(gaps), have)
             return False, "resource"
         before_q = self.queue(sc)
-        self.dev.tap(*btn.center, delay=1.6)
+        click = lambda: self.dev.tap(*btn.center, delay=1.6)
+        if approve:
+            if not approve(click):
+                return False, "cancelled"
+        else:
+            click()
         sc = self.ui.grab_stable()
         after_q = self.queue(sc)
         ok, why = self.verify_training_click(sc, before_q, after_q)
@@ -397,7 +402,9 @@ class Drill:
         slot = int(job.get("slot") or 0)
         if slot:
             self.bot.phase(f"正在训练{name}第 {slot} 个兵（读取面板费用和时长）")
-        got, blocked = self._train_army_checked(name, limit=want, slot=slot)
+        got, blocked = self._train_army_checked(
+            name, limit=want, slot=slot,
+            approve=lambda click: ops.attempt("drill", job, click))
         who = f"{name} 第 {slot} 个兵" if slot else name
         if got:
             self.bot.state.inc("trained", got)
@@ -426,10 +433,11 @@ class Drill:
         self.ui.to_map()
         return got
 
-    def _train_army_checked(self, name, limit=9, slot=0):
+    def _train_army_checked(self, name, limit=9, slot=0, approve=None):
         """训练到 limit 个为止。返回 (训练数, 阻断原因)。
 
         slot=1..5 时只练用户指定的那个兵种，不再从左往右挨个试。
+        approve：每次实际点击前的授权核对（队首仍是用户这条指令才点）。
         阻断原因：resource=资源不足/按钮灰、queue=训练队列满、None=正常结束。
         """
         got = 0
@@ -445,7 +453,7 @@ class Drill:
                 return 0, None
             x = centers[slot - 1]
             for _ in range(limit):
-                ok, why = self.train_soldier(x)
+                ok, why = self.train_soldier(x, approve=approve)
                 if not ok:
                     return got, ("resource" if why == "resource" or (why and ("资源" in why or "灰" in why or "不足" in why)) else None)
                 got += 1
@@ -462,7 +470,7 @@ class Drill:
                     return got, None
                 if x < 60 or x > 690:
                     continue
-                ok, why = self.train_soldier(x)
+                ok, why = self.train_soldier(x, approve=approve)
                 if not ok:
                     if why == "resource" or (why and ("资源" in why or "不足" in why)):
                         return got, "resource"
@@ -480,114 +488,15 @@ class Drill:
         return got, None
 
     def run(self):
-        if not self.cfg.get("enabled", True):
+        # 只执行用户明确加入队列的操作：队列为空不自动练兵、不自动召回编队。
+        ops = self.bot.operations
+        if not ops:
+            return 0
+        job = ops.head("drill")
+        if not job or not ops.guard_ready("drill"):
             return 0
         self.resource_blocked = False
-        # 网页队列优先：用户在控制台安排了练兵任务就按队列执行
-        if self.bot.operations:
-            job = self.bot.operations.head("drill")
-            if job:
-                if not self.bot.operations.guard_ready("drill"):
-                    return 0  # 资源不足/队列满，冷却中不硬试
-                return self.queued_drill(job)
-        # 练兵顺序（三级优先）：
-        #   1. 用户在控制台填了顺序 → 严格按用户填的来
-        #   2. 没填 → 先接着练“用户正在训练的那支”（游戏里各卡片谁是训练中）
-        #   3. 再按卡片下方数字从大到小（等级练得最深的优先）
-        order = [x for x in (self.cfg.get("priority") or []) if x]
-        user_set = bool(order)
-        try:
-            self.bot.army_snapshot()  # 先刷一次编队状态，好判断谁在主城
-        except Exception:
-            pass
-        sc = self.open_drill()
-        if sc is None:
-            log.info("城里没找到校场（可能还没修）")
-            return 0
-        cards = self.cards(sc)
-        if not cards:
-            self.ui.close()
-            return 0
-        if not user_set:
-            order = self._smart_order(cards)
-            log.info("练兵顺序没填，按智能顺序来：%s", "、".join(order))
-        home_idle = self.bot.home_idle_armies()  # 实时状态里“在主城待机”的编队
-        # known = 成功读到了编队状态（区别于“没读到”）。真机发现：全部编队都在外待机时
-        # home_idle 是空集（falsy），若用 home_idle 判断，away 永远为空 → 不召回、空点训练。
-        known = bool(getattr(self.bot, "_armies_cache", None))
-        # 练兵要求编队在城里待机。可 expand 会把这些编队一直派出去打地，结果
-        # “编队在外面，游戏不让训练” → 兵种等级永远升不上去 → 又打不动高级地，
-        # 死锁。所以先把要练的编队召回，练完再让它们出去。
-        away = [n for n in order if known and n not in home_idle]
-        if away:
-            # 别每次都召回：编队刚被派出去打地就被拉回来，来回白跑。
-            # 只有在“确实很久没练成过兵”时才打断它们。
-            last_ok = float(self.bot.state.data.get("drill_last_ok") or 0)
-            quiet_h = float(self.cfg.get("recall_for_drill_hours", 2))
-            if time.time() - last_ok >= quiet_h * 3600:
-                log.info("要练兵的编队在外面（%s），先召回（已经 %.1f 小时没练成过）",
-                         "、".join(away), (time.time() - last_ok) / 3600 if last_ok else 999)
-                try:
-                    self.bot.expand.recall(names=away, thr=1.0)
-                    self.bot.army_snapshot()
-                    home_idle = self.bot.home_idle_armies()
-                except Exception as e:
-                    log.warning("  召回失败：%s", e)
-                # recall 会离开校场、去大地图点「行军」选编队，结束后停在地图。
-                # 必须重新打开校场，否则后面 select_army 在地图上找不到编队卡片（真机踩过）。
-                sc = self.open_drill()
-                if sc is None:
-                    log.info("召回后没能重新打开校场，本轮先到这")
-                    self.ui.to_map()
-                    return 0
-            else:
-                log.debug("要练的编队在外面，但最近练过，先不打断它们")
-        n = 0
-        for name in order:
-            if known and name not in home_idle:
-                log.info("  %s 不在主城，跳过训练（按实时状态）", name)
-                continue
-            if sc is None:  # 上一轮 select_army 失败丢了界面状态，重开校场兜底
-                sc = self.open_drill()
-                if sc is None:
-                    break
-            q = self.queue(sc)
-            if q and q[0] >= q[1]:
-                log.info("训练队列满了 (%d/%d)，这轮先到这", q[0], q[1])
-                break
-            picked, why = self.select_army(name)
-            if picked is None:
-                # 连续训练多支时，上一支练完界面可能停在兵种详情/卡片已滑动，
-                # 导致下一支定位不到。重开校场回到主界面再试一次。
-                sc = self.open_drill()
-                if sc is not None:
-                    picked, why = self.select_army(name)
-            if picked is None:
-                log.info("  %s：%s", name, why)
-                sc = self.ui.grab()  # 补一帧，别让 sc 被置空导致下一轮 queue(None) 崩溃
-                continue
-            sc = picked
-            got = self._train_army(name)
-            n += got
-            if got:
-                self.bot.state.inc("trained", got)
-                self.bot.state.data["drill_last_ok"] = time.time()
-                self.bot.state.data["drill_training"] = name  # 记下正在练哪支，下轮接着练
-                self.bot.state.save()
-                log.info("  %s：排了 %d 个兵进训练队列", name, got)
-                # 练兵 = 兵种等级提升 = 战力变强，之前判定“打不动”的地应该立刻能重试，
-                # 别让它们白等 12 小时冷却（招兵那边已经有这个联动，练兵漏了）。
-                k = self.bot.state.reset_hard()
-                if k:
-                    log.info("  兵练上了，之前打不动的 %d 块地解除冷却", k)
-            else:
-                log.debug("  %s：没有能训的兵", name)
-            if self.resource_blocked:
-                log.info("资源不足，本轮不再尝试其他编队或兵种")
-                break
-            sc = self.ui.grab()
-        self.ui.to_map()
-        return n
+        return self.queued_drill(job)
 
     def _train_army(self, name):
         """把当前选中编队里能训的兵逐个排进队列。返回排了几个。"""

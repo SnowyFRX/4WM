@@ -1,4 +1,4 @@
-"""城内建筑升级（只升级已有建筑，不打开修建列表）。
+"""城内建筑升级：只执行用户在网页队列里明确安排的升级；队列为空不自动建造、不自动升级。
 
 识别方式：
   - 城内每个建筑头上有白色等级小盾牌，点它下方的建筑打开面板；
@@ -7,7 +7,6 @@
 
 为了快：第一次把每个建筑点一遍，记住“建筑名 → 位置”（data/state.json 的 building_pos），
 之后按优先级直接点要升级的那个；位置对不上时再重新扫描。
-资源快满时（顶部资源条 ≥95%）优先升级仓库（木/石）或粮仓（粮），避免资源溢出浪费。
 """
 import logging
 import re
@@ -394,17 +393,10 @@ class Build:
         return done
 
     def run(self):
-        if self.bot.operations:
-            job = self.bot.operations.head("build")
-            if job:
-                if not self.bot.operations.guard_ready("build"):
-                    return 0  # 资源不足冷却中，不硬试
-                return self.queued_upgrade(job)
-            return self.construct() if self.cfg.get("construct", False) else 0
-        n = 0
-        if self.cfg.get("construct", False):
-            n = self.construct()
-        if n == 0:
-            n = self.upgrade()
-        # 不主动回地图：loop 里 build 后常接 recruit（同在城内），避免来回进出城
-        return n
+        ops = self.bot.operations
+        if not ops:
+            return 0
+        job = ops.head("build")
+        if not job or not ops.guard_ready("build"):
+            return 0
+        return self.queued_upgrade(job)

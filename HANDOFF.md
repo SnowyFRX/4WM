@@ -273,6 +273,27 @@ adb：`C:\Users\黄尊鹏\Downloads\platform-tools-latest-windows\platform-tools
 
 
 
+### 第 8 轮（2026-11-13，接续上次中断的会话）—— 三层限制：只执行用户明确加入队列的操作
+
+用户要求：队列为空时不自动建造、不自动造兵、不自动练兵，也不再自行换编队、兵种或数量。
+上次会话改了 bot.py / build.py / drill.py 等 4 个文件后中断，本轮补完剩余部分：
+
+| 改动 | 文件 | 说明 |
+|---|---|---|
+| 练兵每次实际点击前核对队首仍是用户指令（`ops.attempt`），与建造/招兵同款授权 | `drill.py` | `_train_army_checked` 增加 approve 参数，`queued_drill` 传入 |
+| 删除练兵空队列兜底：智能顺序自动练兵、为练兵自动召回编队整段移除 | `drill.py` | `run()` 只读队首，空队列直接返回 |
+| 宝箱库房满不再自动点「升级仓库/粮仓」，一律暂停领取、等网页升级队列 | `chests.py` | `_storage_full` 去掉自动升级分支 |
+| 配置注释同步：construct / upgrade_priority / drill.priority / recall_for_drill_hours 标为停用或仅参考 | `config.yaml` | 值未动，行为以代码为准 |
+
+核对过、无需改的：`bot.run_task` 空队列跳过（上轮已改）；build/recruit 的 `run()` 只读队首且点击走 `attempt`；
+quests 只点「领取/完成」不点「前往」；expand 只走用户提交路线/小队。
+旧自动入口（`build.upgrade/construct`、`recruit.fill`、`drill._train_army/_smart_order`）已无运行调用点，仅存为死代码。
+
+**验证**：`check_syntax.py` 63 文件 0 失败；新增 `tests/test_queue_only_drill.py` 3 项全过
+（空队列不打开校场/不练兵、队首执行、每次点击核对队首）。全量单测与改前基线一致
+（85 项、2 失败、45 错误，全部为本环境 cv2 DLL 加载失败与 OneDrive 临时目录权限问题，与本轮改动无关）。
+**未真机验证**：练兵点击授权、库房满暂停，需按第 7 节流程真机点一遍。
+
 ---
 
 ## 7. 待办 / 未验证（接手先做这些）

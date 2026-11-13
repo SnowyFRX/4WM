@@ -145,10 +145,13 @@ class Bot:
         return start <= h < end if start < end else (h >= start or h < end)
 
     def run_task(self, name):
-        log.info("==== 任务: %s ====", name)
-        self.phase(TASK_PHASES.get(name, "正在执行任务"), name)
         route_step = self.route.next() if name == "expand" and self.route else None
         job = self.operations.head(name) if self.operations and name in ("build", "recruit", "drill") else None
+        if name in ("build", "recruit", "drill") and not job:
+            self.state.touch(name)
+            return 0
+        log.info("==== 任务: %s ====", name)
+        self.phase(TASK_PHASES.get(name, "正在执行任务"), name)
         try:
             self.ensure_game()
             r = self.tasks[name]()
