@@ -28,6 +28,7 @@ class Recruit:
         self.dev = bot.dev
         self.ui = bot.ui
         self.cfg = bot.cfg.get("recruit", {})
+        self.resource_shortage = False
 
     def open_barracks(self):
         sc = self.ui.to_city()
@@ -304,9 +305,11 @@ class Recruit:
             ops.observe(gameRecruit=q)
             if q and q[0] >= q[1]:
                 ops.message("recruit", job, "等待游戏招募队列空位。")
+                ops.guard("recruit", 180, "游戏招募队列已满，暂停招募。")
                 return 0
             if cap and cap[0] >= min(cap[1], self.cfg.get("max_per_army", 9)):
-                ops.message("recruit", job, f"{name}已满员。")
+                log.info("%s 已满员，招募队列项按已完成处理", name)
+                ops.complete("recruit", job, spent=int(job.get("count") or 1))
                 return 0
             button = sc.text(r"^招募$", (470, 730, 690, 850))
             if not (q and cap and button and self.slot_selected(sc.img, slot)
@@ -323,6 +326,10 @@ class Recruit:
             new_q = self.queue(after)
             new_cap = self.capacity(after.img)
             ops.observe(gameRecruit=new_q)
+            if after.text(r"资源不足|资源不够"):
+                ops.command({"op": "retry", "kind": "recruit", "id": job["id"]})
+                ops.guard("recruit", self.cfg.get("resource_wait_seconds", 600), "资源不足，暂停招募。")
+                return 0
             if (new_q and new_q[0] > q[0]) or (new_cap and new_cap[0] > cap[0]):
                 ops.complete("recruit", job)
                 self.bot.state.inc("recruited")
@@ -348,18 +355,32 @@ class Recruit:
         for _ in range(12):
             sc = self.ui.grab()
             q = self.queue(sc)
+            cap = self.capacity(sc.img)
             if q and q[0] >= q[1]:
                 self.queue_full = True
                 break
             if not self.button_active(sc.img):
+                self.resource_shortage = True
                 break
             self.dev.tap(*BTN, delay=0.8)
-            n += 1
+            after = self.ui.grab_stable()
+            if after.text(r"资源不足|资源不够"):
+                self.resource_shortage = True
+                log.info("%s 资源不足，本轮停止招募", name)
+                break
+            new_q = self.queue(after)
+            new_cap = self.capacity(after.img)
+            if (q and new_q and new_q[0] > q[0]) or (cap and new_cap and new_cap[0] > cap[0]):
+                n += 1
+            else:
+                log.info("%s 点击招募后没有可核实的队列/兵力增加，这次不算成功", name)
+                break
         if n:
             log.info("为 %s 招募了 %d 名士兵", name, n)
         return n
 
     def run(self):
+        self.resource_shortage = False
         if self.bot.operations:
             job = self.bot.operations.head("recruit")
             if not job:
@@ -407,7 +428,7 @@ class Recruit:
             if away:
                 understrength.append(name)  # 在外面没法补，记下来让开荒任务召回
                 continue
-            if not self.queue_full:
+            if not self.queue_full and not self.resource_shortage:
                 ws = want_slot(self._index(name))
                 if ws in unlocked:
                     total += self.fill(name, ws)
@@ -416,7 +437,7 @@ class Recruit:
         # 还有编队名额就新建编队（但想造的兵种没解锁就留空位，不硬造别的兵种）
         slots = self.army_slots(self.ui.grab())
         while (self.cfg.get("create_armies", True) and slots and slots[0] < slots[1]
-               and not self.queue_full):
+               and not self.queue_full and not self.resource_shortage):
             ws = want_slot(slots[0])  # 新队序号 = 当前已有队数
             if ws not in unlocked:
                 log.info("第%d支编队想造的兵种(槽%d)还没解锁，留空位等你解锁", slots[0] + 1, ws)

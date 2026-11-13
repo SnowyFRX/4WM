@@ -60,14 +60,25 @@ class RejectionTests(unittest.TestCase):
         self.assertFalse(verdict[0])
         self.assertEqual(verdict[1], "resource")
 
-    def test_clean_panel_means_the_click_was_accepted(self):
+    def test_clean_panel_without_queue_change_is_unverified(self):
         class Screen:
             img = None
 
             def text(self, pattern, region=None):
                 return None
 
-        verdict = Drill.verify_training_click(Screen())
+        verdict = Drill.verify_training_click(Screen(), (1, 3), (1, 3))
+        self.assertFalse(verdict[0])
+        self.assertEqual(verdict[1], "unverified")
+
+    def test_queue_increase_means_the_click_was_accepted(self):
+        class Screen:
+            img = None
+
+            def text(self, pattern, region=None):
+                return None
+
+        verdict = Drill.verify_training_click(Screen(), (1, 3), (2, 3))
         self.assertTrue(verdict[0])
 
     def test_gem_dialog_is_still_refused(self):

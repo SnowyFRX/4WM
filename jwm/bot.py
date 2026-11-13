@@ -219,6 +219,11 @@ class Bot:
                 self.observe_resources()
             ran = False
             for name in enabled:
+                # 网页同步是用户正在等的即时指令，优先于普通轮询任务。
+                if self.route and self.route.take_scan_peek() is not None:
+                    self.run_map_scan()
+                    ran = True
+                    break
                 if name == "expand" and self.in_quiet_hours():
                     continue
                 new_route = name == "expand" and self.expand.route_pending()

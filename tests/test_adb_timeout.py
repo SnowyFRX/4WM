@@ -8,13 +8,27 @@
 """
 import os
 import sys
-import tempfile
 import textwrap
 import time
 import unittest
-from pathlib import Path
 
 from jwm.device import Device, Shell
+
+import shutil
+import tempfile
+from pathlib import Path
+
+# 这台机器的 TEMP 指向不可写目录，tempfile.gettempdir() 会回落到当前工作目录，
+# 于是测试临时文件直接丢进仓库根目录。这里固定到 logs/_test_tmp 并自动清理。
+TMP_ROOT = Path(__file__).resolve().parent.parent / "logs" / "_test_tmp"
+
+
+def make_tmp(testcase, prefix):
+    TMP_ROOT.mkdir(parents=True, exist_ok=True)
+    path = tempfile.mkdtemp(prefix=prefix, dir=str(TMP_ROOT))
+    testcase.addCleanup(shutil.rmtree, path, True)
+    return Path(path)
+
 
 # 一个最小 adb shell 模拟器：收到 "命令; echo 标记" 就回 "OUT:命令" + 标记
 GOOD = """
@@ -77,7 +91,7 @@ for line in sys.stdin:
 
 class ShellFixture(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.mkdtemp(prefix="jwm_adb_")
+        self.tmp = make_tmp(self, "adb_")
 
     def _cmd(self, script):
         path = Path(self.tmp, "fake_adb_%d.py" % abs(hash(script)))

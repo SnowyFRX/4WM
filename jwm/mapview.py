@@ -15,8 +15,21 @@ from .vision import ROOT, imread
 
 log = logging.getLogger(__name__)
 
-TILE = 67.5  # 720x1280 下默认缩放的格子边长
+TILE = 67.5  # 720x1280 下默认缩放的格子边长；每次校准主城时按实际选框更新
+MIN_TILE, MAX_TILE = 40.0, 110.0
 GREEN_BGR = np.array([77, 132, 54])  # 自己领地边界线颜色
+
+
+def set_tile_size(value):
+    """用游戏选框实测格子边长；缩放变化后资源模板也必须重建。"""
+    global TILE, _bank
+    value = float(value)
+    if not MIN_TILE <= value <= MAX_TILE:
+        raise ValueError("地图格子尺寸超出可识别范围，请重新校准。")
+    if abs(value - TILE) > 0.25:
+        TILE = value
+        _bank = None
+    return TILE
 
 # 屏幕上被 UI 挡住的区域（不参与地图解析）
 UI_ZONES = [
@@ -40,8 +53,9 @@ SPRITE_DIR = os.path.join(ROOT, "assets", "sprites")
 class TileInfo:
     i: int
     j: int
-    x: int  # 屏幕左上角
-    y: int
+    x: float  # 屏幕左上角（**浮点**：格子间距是 69.5 这类小数，
+              #   取整会让每格漂 0.5px，网页按真实 tile 画就对不齐）
+    y: float
     owned: bool = False
     res: str = None  # grain/tree/stone/None
     level: int = 1  # 1=荒地, 2..5 资源地等级
@@ -51,7 +65,17 @@ class TileInfo:
 
     @property
     def center(self):
-        return int(self.x + TILE / 2), int(self.y + TILE / 2)
+        """点击用的整数中心（手指/点击只接受整数坐标）。"""
+        return int(round(self.x + TILE / 2)), int(round(self.y + TILE / 2))
+
+    @property
+    def left(self):
+        """格子左上角的浮点位置，给「像素↔格子」换算用。"""
+        return float(self.x)
+
+    @property
+    def top(self):
+        return float(self.y)
 
 
 class SpriteBank:
@@ -110,7 +134,7 @@ _bank = None
 def bank():
     global _bank
     if _bank is None:
-        _bank = SpriteBank()
+        _bank = SpriteBank(TILE)
     return _bank
 
 
@@ -179,8 +203,10 @@ class MapGrid:
             for i in range(self.cols):
                 x = self.ox + i * TILE
                 y = self.oy + j * TILE
-                t = TileInfo(i, j, int(round(x)), int(round(y)))
-                if x < 0 or y < 0 or x + TILE > W or y + TILE > H or in_ui(x, y):
+                # 保留浮点：间距是 69.5 这类小数，取整会让每格累积 0.5px 偏移，
+                # 网页按真实 tile 排格子时就越往外越歪。点击时 center 会自己取整。
+                t = TileInfo(i, j, x, y)
+                if x < 0 or y < 0 or x + TILE > W or y + TILE > H or in_ui(x, y, TILE, TILE):
                     t.blocked = True
                 self.tiles[(i, j)] = t
         self._flood_owned()
@@ -191,7 +217,8 @@ class MapGrid:
     def _ring_v(self, t):
         """格子靠边一圈（避开中心图标和边界线）的地面亮度中位数。"""
         s = int(TILE)
-        x, y = t.x, t.y
+        # t.x / t.y 是浮点几何位置，numpy 切片必须用整数
+        x, y = int(round(t.x)), int(round(t.y))
         H, W = self.img.shape[:2]
         if x < 0 or y < 0 or x + s > W or y + s > H:
             return None
@@ -299,7 +326,8 @@ class MapGrid:
                 continue
             if not self._is_frontier(t):
                 continue
-            res, lv, sc = b.classify(self.img, t.x, t.y, seasons=seasons)
+            res, lv, sc = b.classify(self.img, int(round(t.x)), int(round(t.y)),
+                                      seasons=seasons)
             if sc >= 0.80:
                 t.res, t.level, t.score = res, lv, sc
             else:
@@ -309,7 +337,9 @@ class MapGrid:
 
     def _is_water(self, t):
         s = int(TILE)
-        roi = self.img[t.y + 8:t.y + s - 8, t.x + 8:t.x + s - 8]
+        # x/y 现在是浮点几何坐标，numpy 切片必须整数
+        y0, x0 = int(round(t.y)), int(round(t.x))
+        roi = self.img[y0 + 8:y0 + s - 8, x0 + 8:x0 + s - 8]
         if roi.size == 0:
             return False
         hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
@@ -342,7 +372,8 @@ class MapGrid:
                 continue
             # 主城是青灰色屋顶；打下来的村子、山贼营寨是黄褐色，也是暗的 2x2，别认错
             t0 = block[0]
-            roi = self.img[t0.y:t0.y + int(2 * TILE), t0.x:t0.x + int(2 * TILE)].astype(int)
+            _y0, _x0 = int(round(t0.y)), int(round(t0.x))
+            roi = self.img[_y0:_y0 + int(2 * TILE), _x0:_x0 + int(2 * TILE)].astype(int)
             if ((roi[:, :, 0] > roi[:, :, 2] + 15) & (roi[:, :, 0] > 90)).mean() < 0.08:
                 continue
             v = sum(vs) / 4
@@ -369,11 +400,13 @@ class MapGrid:
         out = self.img.copy()
         for t in self.tiles.values():
             s = int(TILE)
+            # 画图接口只接受整数坐标（t.x/t.y 是浮点几何位置）
+            tx, ty = int(round(t.x)), int(round(t.y))
             if t.owned:
-                cv2.rectangle(out, (t.x + 3, t.y + 3), (t.x + s - 3, t.y + s - 3), (0, 255, 0), 1)
+                cv2.rectangle(out, (tx + 3, ty + 3), (tx + s - 3, ty + s - 3), (0, 255, 0), 1)
             elif not t.blocked and self._is_frontier(t):
                 color = {"grain": (0, 220, 255), "tree": (0, 160, 0), "stone": (200, 200, 200)}.get(t.res, (255, 0, 255))
-                cv2.rectangle(out, (t.x + 3, t.y + 3), (t.x + s - 3, t.y + s - 3), color, 2)
+                cv2.rectangle(out, (tx + 3, ty + 3), (tx + s - 3, ty + s - 3), color, 2)
                 label = "%s%d %.2f" % ((t.res or "land")[:2], t.level, t.score)
-                cv2.putText(out, label, (t.x + 4, t.y + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (0, 0, 0), 1)
+                cv2.putText(out, label, (tx + 4, ty + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (0, 0, 0), 1)
         return out

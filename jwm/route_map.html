@@ -745,7 +745,7 @@
   let atlasTiles = new Map(), fillTimer, movedViewport = false;
   let fillBounds = "", triedCenters = new Set(), stalled = 0, pendingFill = null;
   let regionSelect = false, syncSoon = null, regionStart = null, regionEnd = null;
-  const tileSize = 67.5;
+  let tileSize = 67.5;
   const world = p => [(p[0] - state.home[0]) * tileSize, (state.home[1] - p[1]) * tileSize];
   const gamePoint = () => [state.home[0] + Math.round(center[0] / tileSize),
                           state.home[1] - Math.round(center[1] / tileSize)];
@@ -919,6 +919,13 @@
   }
   function render() {
     const view = state?.view;
+    const nextTile = Number(view?.tile) || 67.5;
+    if (state?.home && Math.abs(nextTile - tileSize) > 0.001) {
+      const focus = gamePoint();
+      tileSize = nextTile;
+      center = world(focus);
+      atlasKey = "";
+    }
     const path = state?.path ?? [];
     const index = state?.index ?? 0;
     const active = state?.active;

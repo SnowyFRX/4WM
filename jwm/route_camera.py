@@ -212,11 +212,15 @@ class RouteCamera:
                 selected = True
 
         clean = ui.close(sc) if selected else sc
-        if (not selected or not home or not 1.5 * mv.TILE < detail.span < 2.7 * mv.TILE
-                or detail.has_attack or ui.classify(clean) != "map"):
-            # 主城弹窗的选中框宽度可能量不准，允许 span 未知（0）时继续
-            if not (selected and home and detail.span == 0 and ui.classify(clean) == "map"):
+        if not selected or not home or detail.has_attack or ui.classify(clean) != "map":
+            return None
+        if detail.span:
+            try:
+                # 主城是 2x2：选框宽度直接给出当前缩放下的两格像素宽度。
+                mv.set_tile_size(detail.span / 2)
+            except ValueError:
                 return None
+        # 少数皮肤/弹窗认不出选框时沿用上次校准值，不凭空改成默认尺寸。
         expected = None
         if detail.center:
             expected = (detail.center[0] - mv.TILE / 2, detail.center[1] + mv.TILE / 2)
@@ -356,8 +360,18 @@ class RouteCamera:
                     break
             else:
                 raise ValueError("位置离主城太远，超出本次地图扫描范围。")
-        ax, ay, _, _ = self.anchor
+        ax, ay, gx, gy = self.anchor
         phase = ((ax - mv.TILE / 2) % mv.TILE, (ay - mv.TILE / 2) % mv.TILE)
+        measured = mv.estimate_phase(img[MAP_TOP:MAP_BOTTOM])
+        if measured is not None:
+            # 与网页使用同一块画面检测普通地块边界，再换算回完整截图坐标。
+            measured = (measured[0], (measured[1] + MAP_TOP) % mv.TILE)
+            # 主城只提供游戏坐标；普通地块的领地边线决定这一帧的实际网格。
+            # 同步移动锚点，格子校正后仍对应原来的游戏坐标。
+            dx, dy = ((measured[i] - phase[i] + mv.TILE / 2) % mv.TILE - mv.TILE / 2
+                      for i in (0, 1))
+            self.anchor = (ax + dx, ay + dy, gx, gy)
+            phase = measured
         return mv.MapGrid(img, phase=phase, classify=False)
 
     def _map_shift(self, previous, sc, dx, dy, **confidence):
@@ -466,7 +480,8 @@ class RouteCamera:
         if not ok:
             raise ValueError("地图截图生成失败，请重新读取。")
         self.recent.append((self.home, self.anchor, grid.img))
-        route.publish(self.home, self.xy(SCREEN_CENTER), self.tiles(grid, overlays), jpg.tobytes())
+        route.publish(self.home, self.xy(SCREEN_CENTER), self.tiles(grid, overlays), jpg.tobytes(),
+                      tile=mv.TILE)
 
     @staticmethod
     def _same_view(before, after, overlays):

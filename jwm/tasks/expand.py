@@ -308,17 +308,22 @@ class Expand:
         ok = False
         if self.ui.has_tile_popup(sc):
             d = parse_popup(sc)
-            if d.center and d.x is not None and d.span > 1.5 * mv.TILE and not d.attackable:
-                # 主城坐标是左下那一格
-                cx, cy = d.center
-                self.anchor = (cx - mv.TILE / 2, cy + mv.TILE / 2, d.x, d.y)
-                self.state.data["home"] = [d.x, d.y]
-                for a in (0, 1):
-                    for b in (0, 1):
-                        self.state.data["tiles"]["%d,%d" % (d.x + a, d.y + b)] = {"name": "主城", "status": "owned"}
-                self.state.save()
-                ok = True
-                log.info("坐标校准完成：主城 (%d,%d)", d.x, d.y)
+            if d.center and d.x is not None and d.span > 0 and not d.attackable:
+                try:
+                    mv.set_tile_size(d.span / 2)
+                except ValueError:
+                    log.info("主城选框尺寸异常，本次不校准坐标：%s", d.span)
+                else:
+                    # 主城坐标是左下那一格；格宽以这次选框实测为准。
+                    cx, cy = d.center
+                    self.anchor = (cx - mv.TILE / 2, cy + mv.TILE / 2, d.x, d.y)
+                    self.state.data["home"] = [d.x, d.y]
+                    for a in (0, 1):
+                        for b in (0, 1):
+                            self.state.data["tiles"]["%d,%d" % (d.x + a, d.y + b)] = {"name": "主城", "status": "owned"}
+                    self.state.save()
+                    ok = True
+                    log.info("坐标校准完成：主城 (%d,%d)，格宽 %.1f", d.x, d.y, mv.TILE)
             self.ui.close()
         elif self.ui.classify(sc) != "map":
             self.ui.to_map()

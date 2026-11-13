@@ -1,0 +1,107 @@
+# 九万亩自动脚本配置
+
+device:
+  # adb 设备序列号。留空 = 只有一台设备时自动用它。
+  # Android Studio 模拟器: emulator-5554；MuMu12: 127.0.0.1:16384；雷电: emulator-5554 / 127.0.0.1:5555
+  serial: emulator-5554
+  adb: adb
+
+schedule:
+  # 按顺序轮流执行；每个任务距上次执行超过 intervals 秒才会再执行
+  tasks: [chests, quests, drill, expand, build, recruit, hospital]   # 地图任务在前，城内任务相邻在后；drill 必须在 expand 前（否则编队都被派出去，没法练兵）
+  intervals:        # 秒
+    chests: 600               # 兜底；平时看到军队按钮上的宝箱角标就立刻领
+    quests: 1800
+    build: 600
+    recruit: 120
+    expand: 60
+    drill: 900                # 校场练兵
+    hospital: 600             # 医馆治疗伤兵
+  idle_seconds: 20            # 空闲时每隔多久检查一次宝箱角标/任务红点
+  # 每天这个时段不开荒（例如 PvP 自由交战 19:00-23:00 想让军队留在家），不需要就删掉或设为 null
+  pause_expand_hours: null   # 例: [19, 23]
+
+expand:
+  # 开荒策略：route = 在网页地图选点；spiral = 螺旋开地；value = 只按价值贪心
+  strategy: route
+  spiral_gap: 1               # 圈与圈之间空几圈（1 = 隔一块地）
+  # 目标模式：设了 target 就只往目标方向开路（离目标越近越先打），到了就攻打目标。不需要时设为 null
+  target: null                # 新手区自由开荒，无固定目标
+  target_size: 2
+  attack_names: []            # 目标格允许攻打的建筑名（其他非土地一律不打）
+  target_retry_minutes: 10
+  # 出兵规则（固定，不可配置）：只有战斗预测为“兵不血刃”才自动出兵；
+  # 其他结果（轻微损失/损兵折将/…）会死人，一律跳过，留给你亲自判断操作。
+  # 资源偏好权重（对应 粮食 / 木头 / 石头）；荒地三种各 +1
+  weights:
+    grain: 1.0                # 三种资源地等权重；优先资源地、少占荒地由螺旋策略保证
+    tree: 1.0
+    stone: 1.0
+  points_weight: 0.5          # 领土积分的权重（1~5 级地分别 2/4/6/8/10 分）
+  distance_penalty: null      # 离主城越远分越低。null = 按主城等级自动（新手 0.5 → 高级 0.15）
+  # 你手选的路线，脚本能不能自己改：
+  #   strict   = 严格听你的。打不动就停在原地报告，绝不绕行、绝不重排路线。
+  #   flexible = 允许脚本在打不动时自动绕开，但会在网页上写明跳过了哪一格。
+  route_mode: strict
+  lookahead: 0.3              # 旁边有好资源地时，给通往它的格子加分
+  retry_hours: null           # 打不动的地块多久后再试。null = 按主城等级自动
+  # 战绩学习：按「资源+等级+难度」记成功率，用期望收益（成功率×产量）筛选值不值得打
+  learn_enabled: true
+  learn_min_try: null         # 这类地至少试几次才用学习数据判断。null = 按主城等级自动
+  learn_min_expect: 1.0       # 期望收益低于此值就跳过
+  learn_stale_hours: null     # 学习数据超过这么久就作废重试。null = 按主城等级自动
+  retry_hours_wipe: 12        # 学习判定“打不过”的地，冷却这么久
+  stuck_limit: null           # 同一格连续几次打不出兵不血刃就标记难打并绕行。null = 自动
+  max_candidates_per_round: null # 每轮最多尝试几个候选格。null = 按编队数量自动
+  max_march_seconds: 1800     # 行军超过这个时间的编队不派
+  max_difficulty: null        # 难度上限，例: 普通（简单/入门/普通/进阶/困难/地狱）
+  allow_without_reward_points: true  # 奖励点用完后是否继续占地（占地还有产量，只是没宝箱）
+  min_attack_hp: null         # 血量低于此比例的编队不派去打地。null = 按账号自动
+  recall_hp: null             # 派不出兵时把低血编队召回主城。null = 按账号自动
+  heal_before_retry: 0.95     # 地块打不出兵不血刃且编队带伤（低于此血量）时，先回城回满血再试
+
+build:
+  queue_size: 1               # 同时建造/升级的建筑数（施工队列）
+  construct: true             # 前期先把修建列表里能建的新建筑都建起来（建满后自动只升级）
+  resource_wait_seconds: null # 资源/条件不足时暂停多久。null = 自动
+  # 升级优先级（靠前的先升）。不在列表里的建筑不会自动升级。
+  upgrade_priority: [主城, 兵营, 铁匠铺, 仓库, 粮仓, 医馆, 校场, 城墙, 研究所, 马厩, 英雄殿, 大使馆]
+  # 资源快满（≥95%）时会先升仓库（木/石）或粮仓（粮），不用写在这里。
+
+recruit:
+  max_per_army: null          # 每支编队最多几个兵。null = 按主城等级自动（1级3人…4级起9人）
+  resource_wait_seconds: null # 资源不足时暂停多久再试。null = 自动（新手期久一点）
+  # 编队分工：前 melee_count 支造近战，其余全造远程（近战太多会被挤在外围打不到人，
+  # 远程挤在外围也能输出，所以远程越多越好）。想造的兵种还没解锁的编队会留空位等你解锁，
+  # 绝不会去点锁着的兵种格（那是花钱/不可逆的解锁）。
+  melee_count: 2              # 造几支近战编队（其余都是远程）
+  melee_slot: 1               # 近战兵种：“选择士兵”一排从左数第几格（1 = 长枪兵）
+  ranged_slot: 2              # 远程兵种格（2 = 连弩兵，解锁后生效）
+  # 重点兵种接口：填了就所有编队都只造这一格的兵（覆盖上面的近战/远程分配），由你来定。
+  focus_slot: null
+
+drill:
+  enabled: true
+  resource_wait_seconds: null # 资源/队列不足时暂停多久。null = 自动
+  # 只训这里填的编队；留空 [] 则按智能顺序（正在训练的优先，再按等级从高到低）
+  priority: []
+  # 编队被 expand 派出去时，超过这么久没练成过兵才召回它们来练兵（避免来回白跑）
+  recall_for_drill_hours: 2
+
+hospital:
+  enabled: true
+
+# 网页控制台：地址固定为 http://127.0.0.1:8765/jwm/
+# 端口被占用时脚本会自动往后找（8766/8767/8768），实际地址写在 data/web_url.txt
+web:
+  port: 8765
+  # 启动时怎么处理上次的地图缓存：
+  #   reuse   = 直接沿用（最快，但游戏里领地和地块可能已变化）
+  #   ask     = 在网页上问你「沿用还是重新读取」
+  #   refresh = 每次启动都重新读取（最准确，但慢）
+  map_cache_mode: ask
+
+# 调试：保存地图解析标注图到 logs/expand/
+# 默认关闭（生产环境每轮写图会拖慢并占磁盘）；需要排查识别问题时再改 true。
+# 错误/未知回执的关键截图不受这个开关影响，始终保留。
+debug: false

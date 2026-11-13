@@ -798,15 +798,21 @@ class RouteMap:
         except Exception:
             return "reuse"
 
-    def publish(self, home, center, tiles, image):
+    def publish(self, home, center, tiles, image, tile=67.5, alignment=2):
         self.identify(home)
         with self.lock:
+            tile = float(tile)
+            # 不同缩放或旧相位算法的截图不能直接拼接；格子坐标保留，旧图全部重读。
+            if any(view.get("alignment") != alignment
+                   or abs(float(view.get("tile", 67.5)) - tile) > 0.25
+                   for view, _ in self.frames.values()):
+                self.frames.clear()
             tiles = [{**t, "kind": "owned"} if t["kind"] == "owned_hint"
                      and self.known.get((t["x"], t["y"])) == "owned" else t for t in tiles]
             self.known.update({(t["x"], t["y"]): t["kind"] for t in tiles})
             self.res_map.update({(t["x"], t["y"]): (t.get("res"), t.get("level") or 1) for t in tiles})
             self.frame += 1
-            self.view = dict(frame=self.frame, center=center)
+            self.view = dict(frame=self.frame, center=center, tile=tile, alignment=alignment)
             coords = {(t["x"], t["y"]) for t in tiles}
             for number, (view, _) in list(self.frames.items()):
                 if view["center"] == center and all((t["x"], t["y"]) in coords for t in view["tiles"]):

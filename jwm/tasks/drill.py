@@ -30,6 +30,7 @@ class Drill:
         self.bot = bot
         self.dev = bot.dev
         self.ui = bot.ui
+        self.resource_blocked = False
 
     @property
     def cfg(self):
@@ -271,17 +272,15 @@ class Drill:
         return gaps
 
     @staticmethod
-    def verify_training_click(sc):
-        """点过「训练」之后读回执：游戏拒绝时不能算成功。
-
-        真机证据（logs/shots/1111_180223_err_drill.png）：资源不够时游戏弹
-        「资源不足 536/580」。旧代码只认元宝类提示，于是把空试当成功。
-        """
+    def verify_training_click(sc, before_q=None, after_q=None):
+        """只有训练队列实际增加才算受理；没有回执时保持未核实。"""
         if sc.text(r"元宝|立即完成|购买"):
             return False, "游戏提示花元宝，已取消"
         if sc.text(r"资源不足|资源不够|不足"):
             return False, "resource"
-        return True, ""
+        if before_q is not None and after_q is not None and after_q[0] > before_q[0]:
+            return True, ""
+        return False, "unverified"
 
     @staticmethod
     def training_cost(sc):
@@ -326,17 +325,23 @@ class Drill:
         have = self._resources()
         gaps = self.shortfall(parsed["amounts"], have)
         if gaps:
+            self.resource_blocked = True
             log.info("    兵@%d 资源不够，先不点：%s（现有 %s）", x, "、".join(gaps), have)
             return False, "resource"
+        before_q = self.queue(sc)
         self.dev.tap(*btn.center, delay=1.6)
-        sc = self.ui.grab()
-        ok, why = self.verify_training_click(sc)
+        sc = self.ui.grab_stable()
+        after_q = self.queue(sc)
+        ok, why = self.verify_training_click(sc, before_q, after_q)
         if not ok:
             if why == "resource":
+                self.resource_blocked = True
                 # 记下游戏写的真实缺口（画面上的「536/580」），方便判断要等多久
                 gap = sc.text(r"\d+\s*/\s*\d+")
                 log.info("    兵@%d 游戏回了「资源不足」%s，这次不算训练成功", x,
                          "：" + gap.text.strip() if gap else "")
+            elif why == "unverified":
+                log.info("    兵@%d 点击后训练队列没有可核实的增加，这次不算成功", x)
             else:
                 self.ui.close(sc)   # 不花元宝
             return False, why
@@ -477,6 +482,7 @@ class Drill:
     def run(self):
         if not self.cfg.get("enabled", True):
             return 0
+        self.resource_blocked = False
         # 网页队列优先：用户在控制台安排了练兵任务就按队列执行
         if self.bot.operations:
             job = self.bot.operations.head("drill")
@@ -576,6 +582,9 @@ class Drill:
                     log.info("  兵练上了，之前打不动的 %d 块地解除冷却", k)
             else:
                 log.debug("  %s：没有能训的兵", name)
+            if self.resource_blocked:
+                log.info("资源不足，本轮不再尝试其他编队或兵种")
+                break
             sc = self.ui.grab()
         self.ui.to_map()
         return n
@@ -594,6 +603,8 @@ class Drill:
                 ok, why = self.train_soldier(x)
                 if not ok:
                     log.debug("    兵@%d 没训：%s", x, why)
+                    if self.resource_blocked:
+                        return got
                     continue
                 got += 1
                 progressed = True
