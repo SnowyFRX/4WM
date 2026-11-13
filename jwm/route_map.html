@@ -212,11 +212,77 @@
     padding: var(--s-3);
     min-height: 300px;
   }
+  /* hidden 属性自带 display:none，但上面写了 display:grid 会把它压掉，
+     结果「切到全图视图」时实时视野那块仍然占着位置，两个地图上下叠在一起 */
+  .viewport[hidden] { display: none; }
   #map {
     display: block; width: 100%; height: clamp(380px, 68vh, 740px);
     touch-action: none; cursor: grab;
     background: var(--surface-dark);
     border-radius: var(--r-sm);
+  }
+
+  /* ---------- 全图视图：apk 固定地图，不拼截图 ---------- */
+  .viewswitch {
+    display: inline-flex; gap: 2px; margin: 0 0 var(--s-3);
+    background: var(--surface-soft); padding: 3px; border-radius: var(--r-sm);
+  }
+  .viewswitch button {
+    font: inherit; font-size: 13px; padding: 6px 12px; cursor: pointer;
+    border: 0; border-radius: calc(var(--r-sm) - 2px);
+    background: transparent; color: var(--muted);
+  }
+  .viewswitch button[aria-selected="true"] {
+    background: var(--canvas); color: var(--ink);
+    box-shadow: 0 1px 2px #00000014;
+  }
+  .fullmap { margin-top: 0; }
+  .fullmap-bar {
+    display: flex; align-items: center; gap: var(--s-3);
+    flex-wrap: wrap; margin-bottom: var(--s-2);
+    font-size: 13px; color: var(--body);
+  }
+  .fullmap-bar label { display: inline-flex; align-items: center; gap: 6px; }
+  .fullmap-bar select {
+    font: inherit; padding: 4px 8px; border-radius: var(--r-sm);
+    border: 1px solid var(--hairline); background: var(--canvas); color: var(--ink);
+  }
+  .fullmap-bar button {
+    font: inherit; padding: 4px 10px; border-radius: var(--r-sm);
+    border: 1px solid var(--hairline); background: var(--canvas);
+    color: var(--ink); cursor: pointer;
+  }
+  .fullmap-bar button:hover { background: var(--surface-soft); }
+  .fullmap-stage {
+    position: relative;
+    background: var(--surface-soft);
+    padding: var(--s-2);
+    border-radius: var(--r-sm);
+    overflow: hidden;
+  }
+  #fixedCanvas {
+    display: block; width: 100%; height: clamp(380px, 68vh, 740px);
+    cursor: grab; touch-action: none;
+    background: #2b3a4a;
+    border-radius: var(--r-sm);
+    image-rendering: pixelated;
+  }
+  #fixedCanvas.dragging { cursor: grabbing; }
+  .fullmap-tip {
+    position: absolute; pointer-events: none;
+    background: var(--surface-dark); color: var(--on-dark);
+    font: 12px/1.5 var(--font-mono, monospace);
+    padding: 6px 10px; border-radius: var(--r-sm);
+    box-shadow: 0 6px 18px -8px #000;
+    white-space: pre; max-width: 260px;
+  }
+  .fullmap-legend {
+    display: flex; gap: var(--s-3); flex-wrap: wrap;
+    margin-top: var(--s-2); font-size: 12px; color: var(--muted);
+  }
+  .fullmap-legend i {
+    display: inline-block; width: 10px; height: 10px;
+    border-radius: 2px; margin-right: 4px; vertical-align: -1px;
   }
   #map.dragging { cursor: grabbing; }
   #map[hidden], #placeholder[hidden] { display: none; }
@@ -587,14 +653,55 @@
         <button id="syncNow" title="把模拟器镜头移到这里，重新截一帧拼进地图">同步模拟器到这里</button>
         <span class="muted" id="syncHint"></span>
       </div>
-      <div class="viewport">
+      <!-- 视图切换：全图（apk 固定地图，快且全） / 实时视野（截图拼接） -->
+      <div class="viewswitch" role="tablist" aria-label="地图视图">
+        <button id="viewFixed" role="tab" aria-selected="true">全图 · 固定地图</button>
+        <button id="viewLive" role="tab" aria-selected="false">实时视野 · 截图拼接</button>
+      </div>
+      <div class="viewport" id="mapViewport">
         <p id="placeholder">进入游戏后，脚本会读取主城周边地图。</p>
         <svg id="map" viewBox="0 270 720 880" aria-label="可选地块地图" hidden>
           <defs id="mapClips"></defs><g id="mapImages"></g>
           <g id="cells"></g><g id="markers" pointer-events="none"></g>
         </svg>
       </div>
-      <div class="legend">
+      <!-- 全图视图：直接用 apk 里的固定地图渲染，不再拼接截图 -->
+      <div class="fullmap" id="fullmapBox" hidden>
+        <div class="fullmap-bar">
+          <label>地图
+            <select id="fixedMapSelect"></select>
+          </label>
+          <label>每格
+            <select id="fixedScale">
+              <option value="1">1 px</option>
+              <option value="2">2 px</option>
+              <option value="4">4 px</option>
+              <option value="6" selected>6 px</option>
+              <option value="8">8 px</option>
+            </select>
+          </label>
+          <label title="apk 里没说地图行序是屏幕行还是游戏 y（向上）。勾一下，主城周边地形对上就是对的。">
+            <input type="checkbox" id="fixedFlip"> 上下翻转
+          </label>
+          <span class="muted" id="fixedStat"></span>
+          <button id="fixedCenter" title="把视图移到主城">回到主城</button>
+          <span class="muted" id="fixedHint">滚轮缩放 · 拖动平移 · 点击格子看详情</span>
+        </div>
+        <div class="fullmap-stage" id="fixedStage">
+          <canvas id="fixedCanvas"></canvas>
+          <div class="fullmap-tip" id="fixedTip" hidden></div>
+        </div>
+        <div class="fullmap-legend">
+          <span><i style="background:#4a90c7"></i>水域</span>
+          <span><i style="background:#e8d67a"></i>粮地</span>
+          <span><i style="background:#569e5c"></i>木地</span>
+          <span><i style="background:#a8a8a8"></i>石地</span>
+          <span><i style="background:#cec89e"></i>荒地</span>
+          <span><i style="background:#6e6056"></i>建筑</span>
+          <span><i style="background:#96ba8c"></i>地形装饰</span>
+        </div>
+      </div>
+      <div class="legend" id="liveLegend">
         <span><i class="key owned"></i>已确认占领</span>
         <span><i class="key route"></i>开荒路线</span>
         <span><i class="key water"></i>水域</span>
@@ -975,6 +1082,11 @@
       renderSquads(state.operations.squads || [], state.operations.activeSquad, state.routeKey || "");
     }
     renderOps();
+    // 全图视图要跟着状态走：占领到哪、路线挪到哪，都要实时反映
+    if (mapViewMode === "fixed") {
+      if (!fixedAutoTried && state?.home) fixedAutoPick();
+      fixedDraw();
+    }
   }
   const taskNames = { idle: "空闲", game: "游戏连接", map: "地图扫描", refresh: "状态刷新",
     build: "城建", recruit: "招募", expand: "开荒", chests: "编队宝箱", quests: "任务奖励" };
@@ -1704,8 +1816,521 @@
     }
     scheduleSync(state?.scanning || state?.warming ? 240 : 1000);
   }
+  // ---------------- 全图视图（apk 固定地图） ----------------
+  // 全新路线：不再拼接游戏截图。apk 里有整张 600x600 的固定地图，
+  // 每格是什么资源、几级、产量多少全部已知，一次渲染整张图。
+  const fixed = {
+    maps: [],          // 可用地图列表
+    name: "",          // 当前选中的地图
+    w: 0, h: 0,        // 地图尺寸
+    scale: 6,          // 每格渲染成几像素
+    view: { x: 0, y: 0 },   // 视图左上角对应的**屏幕**格坐标
+    drag: null,
+    loaded: false,
+    flip: false,       // y 轴方向：false=数组行序当屏幕行，true=游戏 y 向上
+  };
+
+  const FIXED_COLORS = {
+    water: "#4a90c7", empty: "#cec89e", grain: "#e8d67a",
+    timber: "#569e5c", stone: "#a8a8a8", building: "#6e6056",
+    decor: "#96ba8c", other: "#c4c4b4", unknown: "#ff00ff",
+  };
+
+  const FIXED_STORE = "jwm.fixed.name";
+  const FIXED_FLIP = "jwm.fixed.flip";
+
+  async function loadFixedMaps() {
+    try {
+      const r = await fetch("fixed", { cache: "no-store" });
+      if (!r.ok) return false;
+      const data = await r.json();
+      fixed.maps = data.maps || [];
+      if (!fixed.maps.length) return false;
+      // 默认选哪张：优先「上次选的那张」，否则优先选大图。
+      // 以前直接取 maps[0]，而排序后的第一张是 maps_0（50×50 的教学小图），
+      // 主城 (243,291) 根本不在图上，打开就是一片空白。
+      let picked = "";
+      try { picked = localStorage.getItem(FIXED_STORE) || ""; } catch (e) { picked = ""; }
+      if (!fixed.maps.some(m => m.name === picked)) {
+        const big = fixed.maps.filter(m => m.width >= 600 && m.height >= 600);
+        picked = (big.length ? big : fixed.maps)
+          .slice()
+          .sort((a, b) => b.width * b.height - a.width * a.height)[0].name;
+      }
+      fixed.name = picked;
+      try { fixed.flip = localStorage.getItem(FIXED_FLIP) === "1"; } catch (e) { fixed.flip = false; }
+      const box = $("fixedMapSelect");
+      box.replaceChildren(...fixed.maps.map(m => {
+        const o = document.createElement("option");
+        o.value = m.name;
+        o.textContent = `${m.name} · ${m.width}×${m.height}`;
+        return o;
+      }));
+      box.value = fixed.name;
+      fixed.loaded = true;
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function fixedMapMeta(name) {
+    return fixed.maps.find(m => m.name === name);
+  }
+
+  function fixedApplyMeta() {
+    const meta = fixedMapMeta(fixed.name);
+    if (!meta) return;
+    fixed.w = meta.width;
+    fixed.h = meta.height;
+    $("fixedMapSelect").value = fixed.name;
+    $("fixedScale").value = String(fixed.scale);
+    $("fixedFlip").checked = Boolean(fixed.flip);
+    const st = meta.stats || {};
+    const parts = Object.entries(st)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 5)
+      .map(([k, v]) => `${fixedKindName(k)} ${v.toLocaleString()}`);
+    $("fixedStat").textContent = parts.join(" · ") + (fixed.autoNote ? " · " + fixed.autoNote : "");
+  }
+
+  // 游戏坐标 (x, y) → 固定地图上的屏幕格坐标。
+  // flip 为真时游戏 y 向上（行 0 在底部）。
+  function fixedScreenOf(x, y) {
+    return [x, fixed.flip ? (fixed.h - 1 - y) : y];
+  }
+  // 反过来：屏幕格 → 游戏坐标
+  function fixedGameOf(sx, sy) {
+    return [sx, fixed.flip ? (fixed.h - 1 - sy) : sy];
+  }
+
+  function fixedKindName(k) {
+    return { water: "水域", empty: "荒地", grain: "粮地", timber: "木地",
+             stone: "石地", building: "建筑", decor: "装饰", other: "其他",
+             unknown: "未知" }[k] || k;
+  }
+
+  // 画布尺寸随容器变化
+  function fixedResize() {
+    const c = $("fixedCanvas");
+    if (!c) return;
+    const r = c.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    c.width = Math.max(1, Math.round(r.width * dpr));
+    c.height = Math.max(1, Math.round(r.height * dpr));
+  }
+
+  function fixedDraw() {
+    if (!fixed.loaded) return;
+    const c = $("fixedCanvas");
+    if (!c || !c.width) return;
+    const ctx = c.getContext("2d");
+    const dpr = window.devicePixelRatio || 1;
+
+    // 可视区域对应的屏幕格范围
+    const tilePx = fixed.scale * dpr;          // 每格多少设备像素
+    const cols = Math.ceil(c.width / tilePx);
+    const rows = Math.ceil(c.height / tilePx);
+    const x0 = Math.max(0, Math.floor(fixed.view.x));
+    const y0 = Math.max(0, Math.floor(fixed.view.y));
+
+    ctx.fillStyle = "#2b3a4a";
+    ctx.fillRect(0, 0, c.width, c.height);
+
+    const meta = fixedMapMeta(fixed.name);
+    if (!meta) return;
+
+    // 视口内的格子用后端渲染好的 PNG（比前端逐格快得多）
+    fixedPaintViewport(ctx, x0, y0, cols, rows, tilePx);
+    fixedDrawGrid(ctx, x0, y0, cols, rows, tilePx);
+    // 叠一层「脚本已经知道的格子 + 开荒路线」，这才是开荒时真正要看的
+    fixedDrawOverlay(ctx, tilePx, dpr, x0 - 2, y0 - 2, cols + 4, rows + 4);
+    fixedDrawHome(ctx, tilePx, dpr);
+
+    // 视图自检：出问题时不用开控制台也能看出缩放/坐标对不对
+    $("fixedHint").textContent =
+      `视图 (${Math.round(fixed.view.x)}, ${Math.round(fixed.view.y)})`
+      + ` · 每格 ${fixed.scale}px · 可见 ${cols}×${rows} 格`
+      + ` · 画布 ${c.width}×${c.height}`;
+  }
+
+  // 视口内的格子用后端渲染好的 PNG（比前端逐格快得多）
+  const fixedImg = { key: "", img: null, x0: 0, y0: 0, w: 0, h: 0, loading: false };
+
+  function fixedPaintViewport(ctx, x0, y0, cols, rows, tilePx) {
+    // 请求范围留一点余量，拖动时不至于频繁重取
+    const padCells = 20;
+    const reqX = Math.max(0, x0 - padCells);
+    const reqY = Math.max(0, y0 - padCells);
+    const reqW = Math.min(fixed.w - reqX, cols + padCells * 2);
+    const reqH = Math.min(fixed.h - reqY, rows + padCells * 2);
+    const flip = fixed.flip ? 1 : 0;
+    const key = `${fixed.name}:${reqX},${reqY},${reqW},${reqH}:${fixed.scale}:${flip}`;
+
+    if (fixedImg.key !== key && !fixedImg.loading) {
+      fixedImg.loading = true;
+      const img = new Image();
+      img.onload = () => {
+        fixedImg.key = key;
+        fixedImg.img = img;
+        fixedImg.x0 = reqX; fixedImg.y0 = reqY;
+        fixedImg.w = reqW; fixedImg.h = reqH;
+        fixedImg.loading = false;
+        fixedDraw();
+      };
+      img.onerror = () => { fixedImg.loading = false; };
+      img.src = `fixedimg/${fixed.name}?x0=${reqX}&y0=${reqY}&w=${reqW}&h=${reqH}`
+              + `&scale=${fixed.scale}&flip=${flip}`;
+    }
+
+    if (fixedImg.img && fixedImg.key === key) {
+      // 图片是按屏幕行序渲染的，直接按视图偏移贴上去
+      const dx = (fixedImg.x0 - fixed.view.x) * tilePx;
+      const dy = (fixedImg.y0 - fixed.view.y) * tilePx;
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(fixedImg.img, dx, dy,
+                    fixedImg.w * tilePx, fixedImg.h * tilePx);
+    }
+  }
+
+  // 网格线只在放得够大时画，否则一片黑
+  function fixedDrawGrid(ctx, x0, y0, cols, rows, tilePx) {
+    if (tilePx < 8) return;
+    ctx.strokeStyle = "rgba(255,255,255,0.10)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let i = 0; i <= cols; i++) {
+      const x = (x0 + i - fixed.view.x) * tilePx;
+      ctx.moveTo(x, 0); ctx.lineTo(x, ctx.canvas.height);
+    }
+    for (let j = 0; j <= rows; j++) {
+      const y = (y0 + j - fixed.view.y) * tilePx;
+      ctx.moveTo(0, y); ctx.lineTo(ctx.canvas.width, y);
+    }
+    ctx.stroke();
+  }
+
+  // 把「脚本已知的归属」和「开荒路线」画到固定地图上。
+  // 数据来自 /state：frames[].tiles[]（游戏坐标 + kind）、path（当前路线）。
+  function fixedDrawOverlay(ctx, tilePx, dpr, sx0, sy0, sw, sh) {
+    if (tilePx < 3) return;                    // 太小了画上去只是一团糊
+    const px = (sx, sy) => [(sx - fixed.view.x) * tilePx, (sy - fixed.view.y) * tilePx];
+
+    // 1) 已占领 / 归属待核对的格子
+    const owned = [];
+    for (const f of state?.frames || []) {
+      for (const t of f.tiles || []) {
+        if (t.kind === "owned" || t.kind === "owned_hint") owned.push(t);
+      }
+    }
+    if (owned.length) {
+      for (const t of owned) {
+        const [sx, sy] = fixedScreenOf(t.x, t.y);
+        if (sx < sx0 || sy < sy0 || sx > sx0 + sw || sy > sy0 + sh) continue;
+        const [dx, dy] = px(sx, sy);
+        ctx.fillStyle = t.kind === "owned" ? "rgba(93,184,114,0.34)" : "rgba(93,184,114,0.16)";
+        ctx.fillRect(dx, dy, tilePx, tilePx);
+        if (tilePx >= 10) {
+          ctx.strokeStyle = t.kind === "owned" ? "rgba(93,184,114,0.95)" : "rgba(93,184,114,0.55)";
+          ctx.lineWidth = Math.max(1, dpr);
+          ctx.strokeRect(dx + .5, dy + .5, tilePx - 1, tilePx - 1);
+        }
+      }
+    }
+
+    // 2) 开荒路线：当前路线画实线，草稿画虚线
+    const routes = [];
+    if (draft.length) routes.push({ path: draft, tag: "draft" });
+    if (state?.path?.length) routes.push({ path: state.path, tag: "active", index: state?.index ?? 0 });
+    for (const r of routes) {
+      if (r.path.length < 2) continue;
+      ctx.beginPath();
+      ctx.lineWidth = Math.max(1.5, tilePx * 0.16);
+      ctx.strokeStyle = r.tag === "draft" ? "rgba(204,120,92,0.9)" : "rgba(232,214,122,0.95)";
+      ctx.setLineDash(r.tag === "draft" ? [6 * dpr, 4 * dpr] : []);
+      r.path.forEach((p, i) => {
+        const [sx, sy] = fixedScreenOf(p[0], p[1]);
+        const [dx, dy] = px(sx + 0.5, sy + 0.5);
+        if (i === 0) ctx.moveTo(dx, dy); else ctx.lineTo(dx, dy);
+      });
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // 路线上的格子打点，下一步用实心圆强调
+      if (tilePx >= 6) {
+        r.path.forEach((p, i) => {
+          const done = r.tag === "active" && i < r.index;
+          const [sx, sy] = fixedScreenOf(p[0], p[1]);
+          const [dx, dy] = px(sx + 0.5, sy + 0.5);
+          ctx.beginPath();
+          ctx.fillStyle = done ? "rgba(93,184,114,0.85)"
+                        : (i === r.index && r.tag === "active" ? "#ffffff" : "rgba(255,255,255,0.7)");
+          ctx.arc(dx, dy, Math.max(1.5, tilePx * 0.22), 0, Math.PI * 2);
+          ctx.fill();
+        });
+      }
+    }
+  }
+
+  // 主城位置标一个十字 + 圆环
+  function fixedDrawHome(ctx, tilePx, dpr) {
+    const home = state?.home;
+    if (!home) return;
+    const [sx, sy] = fixedScreenOf(home[0], home[1]);
+    const cx = (sx + 0.5 - fixed.view.x) * tilePx;
+    const cy = (sy + 0.5 - fixed.view.y) * tilePx;
+    if (cx < -50 || cy < -50 || cx > ctx.canvas.width + 50 || cy > ctx.canvas.height + 50) return;
+    ctx.strokeStyle = "#ffffff";
+    ctx.lineWidth = 2 * dpr;
+    ctx.beginPath();
+    ctx.arc(cx, cy, Math.max(6, tilePx * 1.2), 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(cx - 10 * dpr, cy); ctx.lineTo(cx + 10 * dpr, cy);
+    ctx.moveTo(cx, cy - 10 * dpr); ctx.lineTo(cx, cy + 10 * dpr);
+    ctx.stroke();
+  }
+
+  function fixedCenterOnHome() {
+    const home = state?.home;
+    const c = $("fixedCanvas");
+    if (!c) return;
+    const tilePx = fixed.scale * (window.devicePixelRatio || 1);
+    const cols = c.width / tilePx, rows = c.height / tilePx;
+    const [sx, sy] = home ? fixedScreenOf(home[0], home[1]) : [fixed.w / 2, fixed.h / 2];
+    fixed.view.x = sx - cols / 2;
+    fixed.view.y = sy - rows / 2;
+    fixedClampView();
+    fixedDraw();
+  }
+
+  function fixedClampView() {
+    const c = $("fixedCanvas");
+    if (!c) return;
+    const tilePx = fixed.scale * (window.devicePixelRatio || 1);
+    const cols = c.width / tilePx, rows = c.height / tilePx;
+    fixed.view.x = Math.max(0, Math.min(Math.max(0, fixed.w - cols), fixed.view.x));
+    fixed.view.y = Math.max(0, Math.min(Math.max(0, fixed.h - rows), fixed.view.y));
+  }
+
+  // 屏幕坐标 → 固定地图的**屏幕格**坐标
+  function fixedCellAt(clientX, clientY) {
+    const c = $("fixedCanvas");
+    const r = c.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    const px = (clientX - r.left) * dpr;
+    const py = (clientY - r.top) * dpr;
+    const tilePx = fixed.scale * dpr;
+    return {
+      x: Math.floor(fixed.view.x + px / tilePx),
+      y: Math.floor(fixed.view.y + py / tilePx),
+    };
+  }
+
+  let fixedHover = { at: 0, cell: "" };
+
+  async function fixedShowTile(clientX, clientY) {
+    const cell = fixedCellAt(clientX, clientY);
+    const tip = $("fixedTip");
+    if (cell.x < 0 || cell.y < 0 || cell.x >= fixed.w || cell.y >= fixed.h) {
+      tip.hidden = true;
+      return;
+    }
+    // 鼠标在格子里挪来挪去会一直触发，按格节流，别把请求打爆
+    const mark = cell.x + "," + cell.y;
+    if (mark === fixedHover.cell && Date.now() - fixedHover.at < 120) return;
+    fixedHover = { at: Date.now(), cell: mark };
+
+    const [gx, gy] = fixedGameOf(cell.x, cell.y);
+    try {
+      const r = await fetch(`fixedtile?map=${encodeURIComponent(fixed.name)}&x=${gx}&y=${gy}`,
+                            { cache: "no-store" });
+      if (!r.ok) { tip.hidden = true; return; }
+      const t = await r.json();
+      const y = t.yield || {};
+      const lines = [
+        `(${t.x}, ${t.y})`,
+        `${fixedKindName(t.kind)}${t.level ? " Lv" + t.level : ""}`,
+      ];
+      if (t.kind === "grain" || t.kind === "timber" || t.kind === "stone") {
+        const parts = [];
+        if (y.grain) parts.push(`粮 +${y.grain}`);
+        if (y.timber) parts.push(`木 +${y.timber}`);
+        if (y.stone) parts.push(`石 +${y.stone}`);
+        if (parts.length) lines.push(parts.join("  "));
+        if (t.hp) lines.push(`血量 ${t.hp}`);
+        if (t.size) lines.push(`占地 ${t.size}`);
+      }
+      tip.textContent = lines.join("\n");
+      const stage = $("fixedStage").getBoundingClientRect();
+      let left = clientX - stage.left + 14;
+      let top = clientY - stage.top + 14;
+      tip.hidden = false;
+      const tw = tip.offsetWidth, th = tip.offsetHeight;
+      if (left + tw > stage.width) left = stage.width - tw - 8;
+      if (top + th > stage.height) top = stage.height - th - 8;
+      tip.style.left = Math.max(4, left) + "px";
+      tip.style.top = Math.max(4, top) + "px";
+    } catch (e) {
+      tip.hidden = true;
+    }
+  }
+
+  function fixedBind() {
+    const c = $("fixedCanvas");
+    if (!c) return;
+
+    c.addEventListener("mousedown", e => {
+      fixed.drag = { x: e.clientX, y: e.clientY, vx: fixed.view.x, vy: fixed.view.y };
+      c.classList.add("dragging");
+    });
+    window.addEventListener("mouseup", () => {
+      fixed.drag = null;
+      c.classList.remove("dragging");
+    });
+    window.addEventListener("mousemove", e => {
+      if (!fixed.drag) return;
+      const dpr = window.devicePixelRatio || 1;
+      const tilePx = fixed.scale * dpr;
+      fixed.view.x = fixed.drag.vx - (e.clientX - fixed.drag.x) * dpr / tilePx;
+      fixed.view.y = fixed.drag.vy - (e.clientY - fixed.drag.y) * dpr / tilePx;
+      fixedClampView();
+      fixedDraw();
+    });
+    c.addEventListener("mousemove", e => {
+      if (!fixed.drag) fixedShowTile(e.clientX, e.clientY);
+    });
+    c.addEventListener("mouseleave", () => { $("fixedTip").hidden = true; });
+    c.addEventListener("wheel", e => {
+      e.preventDefault();
+      const r = c.getBoundingClientRect();
+      const before = fixedCellAt(e.clientX, e.clientY);
+      const steps = [1, 2, 4, 6, 8];
+      let i = steps.indexOf(fixed.scale);
+      if (i < 0) i = steps.indexOf(4);
+      i = Math.max(0, Math.min(steps.length - 1, i + (e.deltaY > 0 ? -1 : 1)));
+      fixed.scale = steps[i];
+      $("fixedScale").value = String(fixed.scale);
+      fixedImg.key = "";
+      const after = fixedCellAt(e.clientX, e.clientY);
+      // 保持鼠标下的格子不动
+      fixed.view.x += before.x - after.x;
+      fixed.view.y += before.y - after.y;
+      fixedClampView();
+      fixedDraw();
+    }, { passive: false });
+
+    $("fixedMapSelect").addEventListener("change", e => {
+      fixed.name = e.target.value;
+      fixedImg.key = "";
+      try { localStorage.setItem(FIXED_STORE, fixed.name); } catch (err) {}
+      fixedApplyMeta();
+      fixedCenterOnHome();
+    });
+    $("fixedScale").addEventListener("change", e => {
+      fixed.scale = Number(e.target.value) || 2;
+      fixedImg.key = "";
+      fixedClampView();
+      fixedDraw();
+    });
+    $("fixedFlip").addEventListener("change", e => {
+      fixed.flip = e.target.checked;
+      try { localStorage.setItem(FIXED_FLIP, fixed.flip ? "1" : "0"); } catch (err) {}
+      fixedImg.key = "";                 // 后端要按新方向重新渲染
+      fixedClampView();
+      fixedDraw();
+    });
+    $("fixedCenter").addEventListener("click", () => fixedCenterOnHome());
+    $("viewFixed")?.addEventListener("click", () => setMapView("fixed"));
+    $("viewLive")?.addEventListener("click", () => setMapView("live"));
+    window.addEventListener("resize", () => { fixedResize(); fixedDraw(); });
+  }
+
+  async function initFixedMap() {
+    const box = $("fullmapBox");
+    if (!box) return;
+    const ok = await loadFixedMaps();
+    if (!ok) {
+      // 没有固定地图数据（apk 未导出）就退回截图拼接视图，不能让地图区空着
+      box.hidden = true;
+      box.dataset.unavailable = "1";
+      setMapView("live");
+      return;
+    }
+    box.hidden = false;
+    delete box.dataset.unavailable;
+    fixedApplyMeta();
+    fixedResize();
+    fixedBind();
+    fixedCentered = false;
+    setMapView("fixed");
+    fixedCenterOnHome();
+  }
+
+  // 视图切换：fixed = apk 固定地图（默认） / live = 截图拼接
+  let mapViewMode = "";
+  function setMapView(mode) {
+    mapViewMode = mode;
+    const fixedBox = $("fullmapBox");
+    // 注意：以前这里写的是 $("mapPage .viewport")，而 $ 是 getElementById，
+    // 永远返回 null —— 于是实时视野的老地图从来不隐藏，两个视图上下叠在一起。
+    const liveBox = $("mapViewport");
+    const btnF = $("viewFixed"), btnL = $("viewLive");
+    const hasFixed = Boolean(fixedBox && fixed.loaded && !fixedBox.dataset.unavailable);
+    if (mode === "fixed" && hasFixed) {
+      fixedBox.hidden = false;
+      if (liveBox) liveBox.hidden = true;
+      if ($("liveLegend")) $("liveLegend").hidden = true;
+      btnF?.setAttribute("aria-selected", "true");
+      btnL?.setAttribute("aria-selected", "false");
+      // 切回来时重新量尺寸，隐藏期间 getBoundingClientRect 是 0
+      requestAnimationFrame(() => { fixedResize(); fixedCenterOnHomeIfNew(); fixedDraw(); });
+    } else {
+      if (fixedBox) fixedBox.hidden = true;
+      if (liveBox) liveBox.hidden = false;
+      if ($("liveLegend")) $("liveLegend").hidden = false;
+      btnF?.setAttribute("aria-selected", "false");
+      btnL?.setAttribute("aria-selected", "true");
+    }
+  }
+
+  // 刚切到全图视图时视野可能还是 0×0 时算的，重新对一次主城
+  let fixedCentered = false;
+  function fixedCenterOnHomeIfNew() {
+    if (fixedCentered) return;
+    fixedCentered = true;
+    fixedCenterOnHome();
+  }
+
+  // 按主城坐标自动认图：主城周围必有一片建筑，拿它到每张候选图上数，
+  // 只有「明显领先」时才切换。用户手动选过就永远不覆盖。
+  let fixedAutoTried = false;
+  async function fixedAutoPick() {
+    const home = state?.home;
+    if (!home || fixedAutoTried) return;
+    fixedAutoTried = true;
+    try {
+      if (localStorage.getItem(FIXED_STORE)) return;   // 用户选过，尊重他
+    } catch (e) {}
+    try {
+      const r = await fetch(`fixedguess?x=${home[0]}&y=${home[1]}`, { cache: "no-store" });
+      if (!r.ok) return;
+      const d = await r.json();
+      if (!d.pick || !fixedMapMeta(d.pick)) {
+        fixed.autoNote = "";
+        return;
+      }
+      fixed.name = d.pick;
+      fixed.autoNote = "已按主城自动认图（" + d.why + "）";
+      fixedImg.key = "";
+      fixedApplyMeta();
+      fixedCenterOnHome();
+    } catch (e) {}
+  }
+
   render();
   sync();
+  initFixedMap();
 </script>
 </body>
 </html>

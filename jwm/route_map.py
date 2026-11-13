@@ -1006,6 +1006,12 @@ class RouteMap:
             def log_message(self, fmt, *args):
                 pass
 
+            def query(self):
+                """解析 URL 查询串，返回 dict（值都是字符串）。"""
+                from urllib.parse import parse_qs, urlparse
+                q = parse_qs(urlparse(self.path).query)
+                return {k: v[0] for k, v in q.items() if v}
+
             def reply(self, status, mime, payload, cache="no-store"):
                 self.send_response(status)
                 self.send_header("Content-Type", mime)
@@ -1033,6 +1039,43 @@ class RouteMap:
                     self.reply(200, "text/html; charset=utf-8", page_bytes())
                 elif self.local() and path == prefix + "state":
                     self.reply_json(200, route.snapshot())
+                elif self.local() and path == prefix + "fixed":
+                    # 固定地图（从 apk 解出的整张地形），给网页画全图用
+                    from . import fixedsrv
+                    self.reply_json(200, fixedsrv.info())
+                elif self.local() and path.startswith(prefix + "fixedimg/"):
+                    # 渲染固定地图的一段：fixedimg/<名字>?x0=&y0=&w=&h=&scale=
+                    from . import fixedsrv
+                    try:
+                        body = fixedsrv.png(path[len(prefix + "fixedimg/"):], self.query())
+                    except KeyError:
+                        self.reply(404, "image/png", b"")
+                    else:
+                        self.reply(200, "image/png", body, "private, max-age=3600")
+                elif self.local() and path == prefix + "fixedtile":
+                    # 单格详情：fixedtile?map=maps_14&x=243&y=291
+                    from . import fixedsrv
+                    q = self.query()
+                    try:
+                        x, y = int(q.get("x", -1)), int(q.get("y", -1))
+                    except (TypeError, ValueError):
+                        self.reply_json(400, {"error": "坐标不合法"})
+                    else:
+                        info = fixedsrv.tile(q.get("map", ""), x, y)
+                        if info is None:
+                            self.reply_json(404, {"error": "没有这一格"})
+                        else:
+                            self.reply_json(200, info)
+                elif self.local() and path == prefix + "fixedguess":
+                    # 按主城坐标猜本局是哪张图：fixedguess?x=243&y=291
+                    from . import fixedsrv
+                    q = self.query()
+                    try:
+                        gx, gy = int(q.get("x", -1)), int(q.get("y", -1))
+                    except (TypeError, ValueError):
+                        self.reply_json(400, {"error": "坐标不合法"})
+                    else:
+                        self.reply_json(200, fixedsrv.guess(gx, gy))
                 elif self.local() and path.startswith(prefix + "map/"):
                     number = path[len(prefix + "map/"):]
                     with route.lock:
