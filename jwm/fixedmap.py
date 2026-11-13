@@ -233,6 +233,7 @@ def load_decorations(path, w, h, deco_table=None, want_rects=False):
 
     grid = [[DECO_NONE] * w for _ in range(h)]
     icon_grid = [[None] * w for _ in range(h)]
+    anchor_grid = [[None] * w for _ in range(h)]
     table = deco_table or {}
     for rec in items:
         did = rec.get("decoration")
@@ -260,44 +261,45 @@ def load_decorations(path, w, h, deco_table=None, want_rects=False):
         for yy in range(y0_, y1_ + 1):
             row = grid[yy]
             irow = icon_grid[yy]
+            arow = anchor_grid[yy]
             for xx in range(x0_, x1_ + 1):
                 row[xx] = code
                 irow[xx] = icon
+                arow[xx] = (x2, y2)
 
     if not want_rects:
         return grid
 
-    # 把「同一张贴图挨着铺的一整片」合并成一块区域。
-    # 湖是逐格重复标记的（相邻几格都是同一个装饰 id），
-    # 若每格都画一次整张贴图，同一片湖会被叠十几次，边缘叠出一条条横带。
-    rects = []
-    seen = [[False] * w for _ in range(h)]
+    # 按「装饰锚点」分块：同一条装饰会在它覆盖的每一格都记一条，
+    # 但 end 字段是**同一个锚点**（实测一片 4×4 的山，16 条记录的 end 都是
+    # (311,242)）。所以以 (icon, end) 分组，一组的格子范围就是这一张图的覆盖区。
+    #
+    # 以前按「相邻同图」合并，会把挨着的几块并成一大块（12×8 之类），
+    # 再拿 4×4 的图去平铺，画面就成了贴瓷砖；只画一次则周围全空。
+    blocks = {}
     for y in range(h):
+        irow = icon_grid[y]
         for x in range(w):
-            icon = icon_grid[y][x]
-            if not icon or seen[y][x]:
+            icon = irow[x]
+            if not icon:
                 continue
-            stack = [(x, y)]
-            seen[y][x] = True
-            minx = maxx = x
-            miny = maxy = y
-            while stack:
-                cx, cy = stack.pop()
-                if cx < minx:
-                    minx = cx
-                elif cx > maxx:
-                    maxx = cx
-                if cy < miny:
-                    miny = cy
-                elif cy > maxy:
-                    maxy = cy
-                for nx, ny in ((cx + 1, cy), (cx - 1, cy), (cx, cy + 1), (cx, cy - 1)):
-                    if (0 <= nx < w and 0 <= ny < h and not seen[ny][nx]
-                            and icon_grid[ny][nx] == icon):
-                        seen[ny][nx] = True
-                        stack.append((nx, ny))
-            rects.append((minx, miny, maxx, maxy, icon))
-    return grid, rects
+            anchor = anchor_grid[y][x]
+            if anchor is None:
+                anchor = (x, y)
+            key = (icon, anchor)
+            box = blocks.get(key)
+            if box is None:
+                blocks[key] = [x, y, x, y]
+            else:
+                if x < box[0]:
+                    box[0] = x
+                elif x > box[2]:
+                    box[2] = x
+                if y < box[1]:
+                    box[1] = y
+                elif y > box[3]:
+                    box[3] = y
+    return grid, [(b[0], b[1], b[2], b[3], k[0]) for k, b in blocks.items()]
 
 
 def deco_path_for(map_dir, name):
@@ -512,30 +514,23 @@ def render_sprite_image(fixed, region, scale, flip, bank):
         """地图行 → 屏幕行（flip 时上下翻转）。"""
         return fixed.h - 1 - y if flip else y
 
-    # 1) 装饰：湖泊/草丛/小丘/山体。每块按自己的原始尺寸贴，居中在它的中心，
-    #    超出格子的部分自然压到邻居格上，多个贴图叠起来才是游戏里那种成片的湖。
+    # 1) 装饰：湖泊/草丛/小丘/山体。
+    #
+    # 一块装饰 = 一张图铺满它覆盖的那片格子（块由锚点确定，见 load_decorations）。
+    # 画的时候按块的格子范围拉伸到正好铺满：贴图尺寸和块尺寸本来就是一致的
+    # （4×4 的山对 4×4 的图、3×2 的湖对 3×2 的图），拉伸只是为了吃掉取整误差，
+    # 保证块与块之间不留缝、也不会像贴瓷砖那样重复。
     for rx0, ry0, rx1, ry1, icon in fixed.deco_rects:
-        raw = bank.raw(icon)
-        if raw is None:
+        if rx1 < x0 or rx0 >= x1 or ry1 < y0 or ry0 >= y1:
             continue
-        sw, sh = raw.size
-        tw = max(1, int(round(sw * S / TILE_PX_REF)))
-        th = max(1, int(round(sh * S / TILE_PX_REF)))
-        # 中心（格子坐标，取格子中心）
-        cxm = (rx0 + rx1) / 2.0 + 0.5
-        cym = (ry0 + ry1) / 2.0 + 0.5
-        # 视口判断必须用**屏幕**坐标：flip 时地图 y 和屏幕 y 是反的，
-        # 拿地图 y 去比视口，整块山会被误判成「不在视口里」直接跳过，
-        # 表现出来就是拖动/缩放时山丘忽隐忽现。
-        cys = (fixed.h - cym) if flip else cym
-        if (cxm + tw / (2.0 * S) <= x0 or cxm - tw / (2.0 * S) >= x1
-                or cys + th / (2.0 * S) <= y0 or cys - th / (2.0 * S) >= y1):
+        # 区域在**屏幕行序**里的上下边界（flip 时地图 y 要翻过来）
+        sy0, sy1 = (fixed.h - 1 - ry1, fixed.h - 1 - ry0) if flip else (ry0, ry1)
+        if sy1 < y0 or sy0 >= y1:
             continue
-        im = bank.sized(icon, tw, th)
+        im = bank.sized(icon, max(1, (rx1 - rx0 + 1) * S), max(1, (sy1 - sy0 + 1) * S))
         if im is None:
             continue
-        img.paste(im, (int(round((cxm - x0) * S - tw / 2.0)),
-                       int(round((cys - y0) * S - th / 2.0))), im)
+        img.paste(im, ((rx0 - x0) * S, (sy0 - y0) * S), im)
 
     # 2) 资源：每格一张图，正好一格大
     rs = max(2, int(round(S)))

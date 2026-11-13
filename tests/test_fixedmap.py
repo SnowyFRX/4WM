@@ -171,32 +171,45 @@ class DecorationTests(unittest.TestCase):
         self.assertEqual(m.color_at(6, 6), PALETTE["building"])
 
 
-    def test_adjacent_same_deco_merges_into_one_block(self):
-        """同一片湖是逐格标记的，必须合并成一块。
+    def test_same_anchor_becomes_one_block(self):
+        """同一个装饰锚点覆盖的格子，算一块（不能逐格各画一张）。
 
-        以前按「每条记录画一张整贴图」来，一片 5×2 的湖会被叠画十几次，
-        边缘叠出一条条横带，看着像错位。
+        实测一片 4×4 的山有 16 条记录，end 全是同一个锚点 (311,242)。
+        按 start 逐条画会叠 16 次、或按相邻合并会把好几块并成一大块，
+        两种都会让山变成贴瓷砖或者断成一片空白。
         """
         items = []
-        for y in range(3, 5):             # 3×2 的一小片湖
+        anchor = 4 * 20 + 4               # 锚点 (4,4)
+        for y in range(3, 5):             # 3×2 的一小片
             for x in range(4, 7):
-                items.append({"start": y * 20 + x, "decoration": 6, "end": y * 20 + x})
+                items.append({"start": y * 20 + x, "decoration": 6, "end": anchor})
         p = self._write(items)
         table = {6: {"icon": "lake_109", "type": 6}}
         grid, rects = fixedmap.load_decorations(p, 20, 20, table, want_rects=True)
-        self.assertEqual(len(rects), 1, "六格同一张图应该合成一块")
+        self.assertEqual(len(rects), 1, "同一锚点应该只成一块")
         self.assertEqual(rects[0], (4, 3, 6, 4, "lake_109"))
         # 每一格仍然要标成「湖」，色块兜底时才不会露底
         self.assertEqual(grid[4][6], fixedmap.DECO_LAKE)
 
-    def test_different_deco_stays_separate(self):
-        """相邻但不是同一张图（湖 vs 山）不能合并。"""
+    def test_different_anchor_stays_separate(self):
+        """相邻但锚点不同 = 两块不同的地块，不能合并。"""
         items = [{"start": 5 * 20 + 5, "decoration": 6, "end": 5 * 20 + 5},
-                 {"start": 5 * 20 + 6, "decoration": 7, "end": 5 * 20 + 6}]
+                 {"start": 5 * 20 + 6, "decoration": 6, "end": 5 * 20 + 6}]
         p = self._write(items)
-        table = {6: {"icon": "lake_109", "type": 6}, 7: {"icon": "hill_105", "type": 5}}
+        table = {6: {"icon": "lake_109", "type": 6}}
         _, rects = fixedmap.load_decorations(p, 20, 20, table, want_rects=True)
         self.assertEqual(len(rects), 2)
+
+    def test_block_size_matches_sprite(self):
+        """块的外接矩形应该正好等于贴图的格数，否则画上去会错位/留缝。"""
+        items = [{"start": y * 20 + x, "decoration": 6, "end": 4 * 20 + 4}
+                 for y in range(3, 7) for x in range(4, 8)]     # 4×4
+        p = self._write(items)
+        table = {6: {"icon": "mountain_3_206", "type": 5}}
+        _, rects = fixedmap.load_decorations(p, 20, 20, table, want_rects=True)
+        self.assertEqual(len(rects), 1)
+        x0_, y0_, x1_, y1_, icon = rects[0]
+        self.assertEqual((x1_ - x0_ + 1, y1_ - y0_ + 1), (4, 4))
 
 
 if __name__ == "__main__":
