@@ -1842,6 +1842,7 @@
 
   const FIXED_STORE = "jwm.fixed.name";
   const FIXED_FLIP = "jwm.fixed.flip";
+  const FIXED_SCALE = "jwm.fixed.scale";
 
   // 鼠标当前所在的格（画细框），以及刚点过的格（画脉冲框）。
   // 只是为了「点下去有反应」，不参与任何判定。
@@ -1882,6 +1883,11 @@
       }
       fixed.name = picked;
       try { fixed.flip = localStorage.getItem(FIXED_FLIP) === "1"; } catch (e) { fixed.flip = false; }
+      // 缩放也记住：不然每次刷新都退回 6px，想一格格点还得重新调
+      try {
+        const s = Number(localStorage.getItem(FIXED_SCALE));
+        if ([2, 4, 6, 10, 16, 24, 32].includes(s)) fixed.scale = s;
+      } catch (e) {}
       const box = $("fixedMapSelect");
       box.replaceChildren(...fixed.maps.map(m => {
         const o = document.createElement("option");
@@ -2099,29 +2105,38 @@
       }
     }
 
-    // 3) 草稿格整格涂亮 + 描边 + 序号。
-    //    以前草稿只有一条细白点，点了一格几乎看不出来，用户以为没点上。
+    // 3) 草稿格：淡填充 + 细描边 + 序号。
+    //    以前是整格橙底 + 粗白框，糊得看不清地形，所以调淡调细。
     if (draft.length) {
-      const font = Math.max(10, Math.round(tilePx * 0.5));
+      const font = Math.max(9, Math.round(tilePx * 0.44));
       draft.forEach((p, i) => {
         const [sx, sy] = fixedScreenOf(p[0], p[1]);
         if (sx < sx0 || sy < sy0 || sx > sx0 + sw || sy > sy0 + sh) return;
         const [dx, dy] = px(sx, sy);
-        ctx.fillStyle = "rgba(232,150,60,0.42)";
+        const isLast = i === draft.length - 1;
+        ctx.fillStyle = isLast ? "rgba(255, 205, 110, 0.34)" : "rgba(255, 205, 110, 0.20)";
         ctx.fillRect(dx, dy, tilePx, tilePx);
-        ctx.strokeStyle = i === draft.length - 1 ? "#ffffff" : "#ffb84d";
-        ctx.lineWidth = i === draft.length - 1 ? Math.max(2, dpr * 2) : Math.max(1.5, dpr * 1.2);
+        ctx.strokeStyle = isLast ? "#ffd77a" : "rgba(232, 163, 61, 0.85)";
+        ctx.lineWidth = isLast ? Math.max(1.8, dpr * 1.8) : Math.max(1, dpr);
         const pad = ctx.lineWidth / 2;
         ctx.strokeRect(dx + pad, dy + pad, tilePx - pad * 2, tilePx - pad * 2);
-        if (tilePx >= 18) {
+        if (tilePx >= 16) {
           ctx.font = `600 ${font}px ui-sans-serif, system-ui, sans-serif`;
           ctx.textAlign = "center";
           ctx.textBaseline = "middle";
-          ctx.lineWidth = Math.max(2, font / 5);
-          ctx.strokeStyle = "rgba(20,20,20,0.75)";
+          ctx.lineWidth = Math.max(2, font / 4);
+          ctx.strokeStyle = "rgba(28, 24, 16, 0.55)";
           ctx.strokeText(String(i + 1), dx + tilePx / 2, dy + tilePx / 2);
-          ctx.fillStyle = "#ffffff";
+          ctx.fillStyle = "#fffdf6";
           ctx.fillText(String(i + 1), dx + tilePx / 2, dy + tilePx / 2);
+        }
+        // 最后一格右下角点一个小圆，一眼看出「接下来点哪里」
+        if (isLast && tilePx >= 10) {
+          ctx.beginPath();
+          ctx.fillStyle = "#ffd77a";
+          ctx.arc(dx + tilePx - tilePx * 0.18, dy + tilePx - tilePx * 0.18,
+                  Math.max(1.6, tilePx * 0.09), 0, Math.PI * 2);
+          ctx.fill();
         }
       });
     }
@@ -2306,8 +2321,18 @@
 
     const p = [gx, gy];
     const last = draft.at(-1);
-    if (draft.some(existing => key(existing) === key(p))) {
-      return fail(`(${gx}, ${gy}) 已经在草稿里了。`);
+    // 再点一次已选的格子 = 撤销。点最后一格就删这一格；
+    // 点中间的格子会把从它开始到末尾一起截掉（路线必须逐格相邻，不能中间挖洞）。
+    const at = draft.findIndex(existing => key(existing) === key(p));
+    if (at >= 0) {
+      const removed = draft.length - at;
+      draft.splice(at);
+      say(removed > 1
+        ? `已撤销 (${gx}, ${gy}) 及其后 ${removed - 1} 格 · 剩 ${draft.length} 格`
+        : `已撤销 (${gx}, ${gy}) · 剩 ${draft.length} 格`);
+      fixedPulse(cell, true);
+      render();
+      return;
     }
     if (t.kind === "water") return fail(`(${gx}, ${gy}) 是水域，不能占领。`);
     if (t.kind === "building") return fail(`(${gx}, ${gy}) 是建筑占地，不能占领。`);
@@ -2382,6 +2407,7 @@
       i = Math.max(0, Math.min(steps.length - 1, i + (e.deltaY > 0 ? -1 : 1)));
       fixed.scale = steps[i];
       $("fixedScale").value = String(fixed.scale);
+      try { localStorage.setItem(FIXED_SCALE, String(fixed.scale)); } catch (err) {}
       fixedImg.key = "";
       const after = fixedCellAt(e.clientX, e.clientY);
       // 保持鼠标下的格子不动
@@ -2400,6 +2426,7 @@
     });
     $("fixedScale").addEventListener("change", e => {
       fixed.scale = Number(e.target.value) || 2;
+      try { localStorage.setItem(FIXED_SCALE, String(fixed.scale)); } catch (err) {}
       fixedImg.key = "";
       fixedClampView();
       fixedDraw();

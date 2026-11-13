@@ -524,17 +524,18 @@ def render_sprite_image(fixed, region, scale, flip, bank):
         # 中心（格子坐标，取格子中心）
         cxm = (rx0 + rx1) / 2.0 + 0.5
         cym = (ry0 + ry1) / 2.0 + 0.5
-        # 视口外就跳过（按贴图自身占的格数放宽）
+        # 视口判断必须用**屏幕**坐标：flip 时地图 y 和屏幕 y 是反的，
+        # 拿地图 y 去比视口，整块山会被误判成「不在视口里」直接跳过，
+        # 表现出来就是拖动/缩放时山丘忽隐忽现。
+        cys = (fixed.h - cym) if flip else cym
         if (cxm + tw / (2.0 * S) <= x0 or cxm - tw / (2.0 * S) >= x1
-                or cym + th / (2.0 * S) <= y0 or cym - th / (2.0 * S) >= y1):
+                or cys + th / (2.0 * S) <= y0 or cys - th / (2.0 * S) >= y1):
             continue
         im = bank.sized(icon, tw, th)
         if im is None:
             continue
-        cxs = cxm - x0
-        cys = (fixed.h - cym if flip else cym) - y0
-        img.paste(im, (int(round(cxs * S - tw / 2.0)),
-                       int(round(cys * S - th / 2.0))), im)
+        img.paste(im, (int(round((cxm - x0) * S - tw / 2.0)),
+                       int(round((cys - y0) * S - th / 2.0))), im)
 
     # 2) 资源：每格一张图，正好一格大
     rs = max(2, int(round(S)))
