@@ -86,31 +86,16 @@ def tile(name, x, y):
 
 
 def guess(x, y, radius=8):
-    """按主城坐标猜「本局是哪张图」。
+    """**已停用**：以前用「主城周围 type=6 的格数」猜本局是哪张图。
 
-    依据：主城周围必有一片建筑占地（land.type=6）。玩家这局的真实主城坐标
-    是已知的（state.home），拿它到每张候选图上数建筑格，哪张图在那一带有
-    大片建筑，哪张就是本局用的图。分数接近时**不给结论**，让用户自己选。
+    这个前提是错的：type=6（id=16 / id=93）是不可通行的地形障碍，
+    不是建筑，主城也不在固定地形里。既然判据不存在，就不该继续猜 ——
+    猜错整张图的后果比「让用户自己选一次」严重得多。
+
+    现在固定返回「无法判断」，网页据此提示用户手选并记住选择。
     """
-    best = []
-    for name in sorted(load_maps()):
-        m = load_maps()[name]
-        if not (0 <= x < m.w and 0 <= y < m.h):
-            continue
-        best.append({"name": name, "building": m.building_around(x, y, radius)})
-    best.sort(key=lambda e: -e["building"])
-    out = {"x": x, "y": y, "radius": radius, "ranking": best, "pick": None, "why": ""}
-    if not best:
-        out["why"] = "主城坐标不在这几张图的范围内。"
-        return out
-    top = best[0]
-    second = best[1]["building"] if len(best) > 1 else 0
-    # 只在大幅领先时才下结论，避免「三张图都差不多」时瞎猜
-    if top["building"] >= 10 and top["building"] >= second * 3:
-        out["pick"] = top["name"]
-        out["why"] = "主城 (%d, %d) 周围有 %d 格建筑，其他图最多 %d 格。" % (
-            x, y, top["building"], second)
-    else:
-        out["why"] = "主城周围建筑格差别不大（%s），无法判断，请手动选。" % (
-            "、".join("%s=%d" % (e["name"], e["building"]) for e in best))
-    return out
+    maps = load_maps()
+    return {"x": x, "y": y, "radius": radius,
+            "ranking": [{"name": n, "building": 0} for n in sorted(maps)],
+            "pick": None,
+            "why": "apk 里没有能可靠判定「本局用哪张图」的字段，请手动选择（选过会记住）。"}

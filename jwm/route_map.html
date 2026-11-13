@@ -1934,8 +1934,9 @@
   }
 
   function fixedKindName(k) {
-    return { water: "水域", empty: "荒地", grain: "粮地", timber: "木地",
-             stone: "石地", building: "建筑", decor: "装饰", other: "其他",
+    return { water: "水域", empty: "空地", grain: "粮地", timber: "木地",
+             stone: "石地", building: "建筑", obstacle: "地形障碍",
+             decor: "地形装饰", other: "其他",
              unknown: "未知" }[k] || k;
   }
 
@@ -2335,6 +2336,9 @@
       return;
     }
     if (t.kind === "water") return fail(`(${gx}, ${gy}) 是水域，不能占领。`);
+    if (t.kind === "obstacle") {
+      return fail(`(${gx}, ${gy}) 是地形障碍（山体/丘陵），不能占领。`);
+    }
     if (t.kind === "building") return fail(`(${gx}, ${gy}) 是建筑占地，不能占领。`);
     if (t.kind === "decor" || t.kind === "other" || t.kind === "unknown") {
       return fail(`(${gx}, ${gy}) 是地形装饰格，不能占领。`);
@@ -2515,30 +2519,18 @@
     fixedCenterOnHome();
   }
 
-  // 按主城坐标自动认图：主城周围必有一片建筑，拿它到每张候选图上数，
-  // 只有「明显领先」时才切换。用户手动选过就永远不覆盖。
+  // 认图：apk 里没有能可靠判定「本局用哪张图」的字段。
+  // 以前拿「主城周围 type=6 的格数」当判据，那批格其实是不可通行的地形障碍，
+  // 不是建筑 —— 判据本身不成立，所以现在只提示用户手选，不再自动切换。
   let fixedAutoTried = false;
   async function fixedAutoPick() {
-    const home = state?.home;
-    if (!home || fixedAutoTried) return;
+    if (fixedAutoTried) return;
     fixedAutoTried = true;
     try {
       if (localStorage.getItem(FIXED_STORE)) return;   // 用户选过，尊重他
     } catch (e) {}
-    try {
-      const r = await fetch(`fixedguess?x=${home[0]}&y=${home[1]}`, { cache: "no-store" });
-      if (!r.ok) return;
-      const d = await r.json();
-      if (!d.pick || !fixedMapMeta(d.pick)) {
-        fixed.autoNote = "";
-        return;
-      }
-      fixed.name = d.pick;
-      fixed.autoNote = "已按主城自动认图（" + d.why + "）";
-      fixedImg.key = "";
-      fixedApplyMeta();
-      fixedCenterOnHome();
-    } catch (e) {}
+    fixed.autoNote = "地图请按游戏实景手动选一次（apk 判不出本局用哪张）";
+    fixedApplyMeta();
   }
 
   render();

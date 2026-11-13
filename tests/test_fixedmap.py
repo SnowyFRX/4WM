@@ -45,9 +45,9 @@ class LandKindTests(unittest.TestCase):
         m = make_map()
         self.assertEqual(m.kind(1), "grain")
 
-    def test_building_and_water(self):
+    def test_obstacle_and_water(self):
         m = make_map()
-        self.assertEqual(m.kind(93), "building")
+        self.assertEqual(m.kind(93), "obstacle")
         self.assertEqual(m.kind(71), "water")
         self.assertIn(71, WATER_IDS)
 
@@ -77,40 +77,29 @@ class RenderTests(unittest.TestCase):
 
 
 class GuessTests(unittest.TestCase):
-    """按主城建筑密度认图：明显领先才给结论。"""
+    """认图：apk 里没有可靠判据，必须拒绝下结论。
 
-    def _guess_with(self, maps, x, y):
+    曾经用「主城周围 type=6 的格数」猜，但那批格是不可通行的地形障碍
+    （id=16/93），不是建筑 —— 判据不成立，猜错整张图的代价太大。
+    """
+
+    def test_never_guesses(self):
         from jwm import fixedsrv
         old = fixedsrv.load_maps
-        fixedsrv.load_maps = lambda: maps
+        fixedsrv.load_maps = lambda: {"maps_a": make_map("maps_a")}
         try:
-            return fixedsrv.guess(x, y)
+            res = fixedsrv.guess(6, 6)
         finally:
             fixedsrv.load_maps = old
-
-    def test_picks_clear_winner(self):
-        a = make_map("maps_a")      # 主城处 9 格建筑
-        b = make_map("maps_b")
-        for y in range(b.h):
-            for x in range(b.w):
-                if b.grid[y][x] == 93:
-                    b.grid[y][x] = 0
-        res = self._guess_with({"maps_a": a, "maps_b": b}, 6, 6)
-        self.assertEqual(res["pick"], "maps_a")
-        self.assertIn("建筑", res["why"])
-
-    def test_refuses_when_ambiguous(self):
-        a = make_map("maps_a")
-        b = make_map("maps_b")       # 同样也有 9 格建筑
-        res = self._guess_with({"maps_a": a, "maps_b": b}, 6, 6)
         self.assertIsNone(res["pick"])
-        self.assertIn("无法判断", res["why"])
+        self.assertIn("手动", res["why"])
 
-    def test_out_of_range_is_skipped(self):
-        small = make_map("maps_small", n=10)
-        res = self._guess_with({"maps_small": small}, 500, 500)
-        self.assertEqual(res["ranking"], [])
-        self.assertIsNone(res["pick"])
+    def test_obstacle_is_not_building(self):
+        """type=6（id=16/93）是不可通行障碍，不能显示成建筑或主城。"""
+        m = make_map()
+        self.assertEqual(m.kind(93), "obstacle")
+        self.assertNotEqual(m.kind(93), "building")
+        self.assertEqual(PALETTE["obstacle"][0], PALETTE["obstacle"][0])
 
 
 class DecorationTests(unittest.TestCase):
@@ -165,10 +154,11 @@ class DecorationTests(unittest.TestCase):
         self.assertNotEqual(c2, fixedmap.DECO_COLOR[fixedmap.DECO_GRASS])
         self.assertGreater(c2[0], c2[2])   # 仍然偏黄
 
-    def test_building_ignores_deco(self):
+    def test_obstacle_ignores_deco(self):
+        """地形障碍不吃地形装饰的染色，否则山上会变色，看着像资源。"""
         m = make_map()
         m.deco = [[fixedmap.DECO_MOUNTAIN] * m.w for _ in range(m.h)]
-        self.assertEqual(m.color_at(6, 6), PALETTE["building"])
+        self.assertEqual(m.color_at(6, 6), PALETTE["obstacle"])
 
 
     def test_same_anchor_becomes_one_block(self):

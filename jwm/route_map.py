@@ -1066,16 +1066,6 @@ class RouteMap:
                             self.reply_json(404, {"error": "没有这一格"})
                         else:
                             self.reply_json(200, info)
-                elif self.local() and path == prefix + "fixedguess":
-                    # 按主城坐标猜本局是哪张图：fixedguess?x=243&y=291
-                    from . import fixedsrv
-                    q = self.query()
-                    try:
-                        gx, gy = int(q.get("x", -1)), int(q.get("y", -1))
-                    except (TypeError, ValueError):
-                        self.reply_json(400, {"error": "坐标不合法"})
-                    else:
-                        self.reply_json(200, fixedsrv.guess(gx, gy))
                 elif self.local() and path.startswith(prefix + "map/"):
                     number = path[len(prefix + "map/"):]
                     with route.lock:

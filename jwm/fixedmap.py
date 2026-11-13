@@ -25,6 +25,7 @@ PALETTE = {
     "timber": (66, 126, 70),       # 木地：深绿（树冠）
     "stone": (176, 176, 166),      # 石地：灰白（石头）
     "building": (120, 96, 86),     # 建筑占地：灰褐
+    "obstacle": (138, 140, 126),   # 地形障碍（山体/丘陵，不可通行）
     "decor": (126, 168, 104),      # 地形装饰位：浅绿
     "empty": (124, 158, 92),       # 空地：草地绿（游戏底色）
     "other": (140, 152, 112),      # 其他地形
@@ -32,7 +33,11 @@ PALETTE = {
 }
 
 # land 表的 type -> 资源类别
-TYPE_KIND = {3: "grain", 4: "timber", 5: "stone", 6: "building",
+# 注意 type=6：实测 id=16 / id=93 都是 occupy=0、icon 为空、满地图各几千格，
+# 是**不可通行的地形障碍**（apk 里的文本键 ui.land_111 / ui.land_112）。
+# 以前一律叫「建筑」是错的 —— 建筑是玩家对象，不在固定地形里；
+# 把它当主城更是错的（主城是动态对象，会覆盖固定地形）。
+TYPE_KIND = {3: "grain", 4: "timber", 5: "stone", 6: "obstacle",
              7: "water", 8: "decor", 9: "other"}
 
 # 水面 id（600×600 地图四角都是 71，已实测验证）
@@ -77,7 +82,7 @@ def land_kind(entry, value):
     t = entry.get("type")
     lv = entry.get("lv") or 0
     if t == 6:
-        return "building"
+        return "obstacle"
     if t == 7:
         return "water"
     if t == 8:
@@ -146,7 +151,7 @@ class FixedMap:
             return (min(255, int(base[0] * f)),
                     min(255, int(base[1] * f)),
                     min(255, int(base[2] * f)))
-        if kind == "building":
+        if kind in ("building", "obstacle"):
             return base
         if d in DECO_COLOR:
             return DECO_COLOR[d]
@@ -184,20 +189,13 @@ class FixedMap:
         return counts
 
     def building_around(self, x, y, r=8):
-        """(x, y) 周围 r 格内有多少「建筑占地」格（land.type == 6）。
+        """**已废弃**：曾经用来「按主城周围建筑密度猜本局是哪张图」。
 
-        用途：判断「本局用的是哪张图」。
-        主城是玩家落脚点，周围一定有一片城墙/建筑（type=6）。
-        每张图的主城位置是预设的，所以在真实主城坐标处，
-        正确的那张图会有一大片 type=6，别的图不会。
+        前提错了：type=6 的 id=16 / id=93 是不可通行的地形障碍，
+        不是建筑，更不是主城（主城是动态对象，会覆盖固定地形）。
+        这个启发式因此不成立，留着只会误导，接口保留只为兼容旧调用。
         """
-        n = 0
-        for yy in range(max(0, y - r), min(self.h, y + r + 1)):
-            row = self.grid[yy]
-            for xx in range(max(0, x - r), min(self.w, x + r + 1)):
-                if (self.land.get(row[xx]) or {}).get("type") == 6:
-                    n += 1
-        return n
+        return 0
 
 
 def _load_land_table(apk_reader):
