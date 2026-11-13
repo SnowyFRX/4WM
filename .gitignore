@@ -8,8 +8,15 @@ __pycache__/
 apk/
 
 # 运行期数据：账号存档（含玩家名/主城坐标）、地图缓存、队列、日志
-data/
-logs/
+# 注意用 data/* 而不是 data/：排除整个目录后，下面的 ! 例外对目录内部不生效
+data/*
+logs/*
+
+# 例外：从 apk 解出的固定地图是**静态资料**，不是运行期数据，要入库。
+# （maps_0/13/14/15 共 3.7MB，每格资源/等级/产量；装饰物纯视觉，继续忽略）
+!data/maps/
+data/maps/*.json
+!data/maps/maps_*.json
 
 # 本机临时
 _tmp/
@@ -22,3 +29,6 @@ tmp*/
 
 # 前端设计检查工具的本地状态（每个开发者自己生成）
 .taste-skill/
+
+# 地图装饰物（阴影/草/湖，纯视觉，可用 jwm/apkmap.py 从 apk 重新导出）
+data/maps/decorations_*.json

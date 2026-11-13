@@ -22,13 +22,14 @@ GREEN_BGR = np.array([77, 132, 54])  # 自己领地边界线颜色
 
 def set_tile_size(value):
     """用游戏选框实测格子边长；缩放变化后资源模板也必须重建。"""
-    global TILE, _bank
+    global TILE, _bank, _bank_tile
     value = float(value)
     if not MIN_TILE <= value <= MAX_TILE:
         raise ValueError("地图格子尺寸超出可识别范围，请重新校准。")
     if abs(value - TILE) > 0.25:
         TILE = value
         _bank = None
+        _bank_tile = 0.0      # 和 _bank 一起失效，避免账本与实际不一致
     return TILE
 
 # 屏幕上被 UI 挡住的区域（不参与地图解析）
@@ -129,12 +130,21 @@ class SpriteBank:
 
 
 _bank = None
+_bank_tile = 0.0      # 这份模板是按哪个 TILE 缩放的
 
 
 def bank():
-    global _bank
-    if _bank is None:
+    """资源图标模板库，按当前 TILE 缓存。
+
+    模板是按格子尺寸预缩放的（s = tile/80），所以 TILE 变了必须重建。
+    以前只建一次就永久缓存：玩家缩放地图后 TILE 从 67.5 变成 69.5，
+    模板还是按 67.5 缩的，尺寸差 3%，匹配分从 0.85+ 掉到 0.6 左右，
+    全部低于 0.80 阈值 → 整张地图的 res 都识别不出来。
+    """
+    global _bank, _bank_tile
+    if _bank is None or abs(_bank_tile - TILE) > 1e-6:
         _bank = SpriteBank(TILE)
+        _bank_tile = TILE
     return _bank
 
 
