@@ -232,7 +232,7 @@ def load_decorations(path, w, h, deco_table=None, want_rects=False):
         return (None, []) if want_rects else None
 
     grid = [[DECO_NONE] * w for _ in range(h)]
-    rects = []
+    icon_grid = [[None] * w for _ in range(h)]
     table = deco_table or {}
     for rec in items:
         did = rec.get("decoration")
@@ -259,13 +259,45 @@ def load_decorations(path, w, h, deco_table=None, want_rects=False):
             continue
         for yy in range(y0_, y1_ + 1):
             row = grid[yy]
+            irow = icon_grid[yy]
             for xx in range(x0_, x1_ + 1):
                 row[xx] = code
-        if icon:
-            rects.append((x0_, y0_, x1_, y1_, icon))
-    if want_rects:
-        return grid, rects
-    return grid
+                irow[xx] = icon
+
+    if not want_rects:
+        return grid
+
+    # 把「同一张贴图挨着铺的一整片」合并成一块区域。
+    # 湖是逐格重复标记的（相邻几格都是同一个装饰 id），
+    # 若每格都画一次整张贴图，同一片湖会被叠十几次，边缘叠出一条条横带。
+    rects = []
+    seen = [[False] * w for _ in range(h)]
+    for y in range(h):
+        for x in range(w):
+            icon = icon_grid[y][x]
+            if not icon or seen[y][x]:
+                continue
+            stack = [(x, y)]
+            seen[y][x] = True
+            minx = maxx = x
+            miny = maxy = y
+            while stack:
+                cx, cy = stack.pop()
+                if cx < minx:
+                    minx = cx
+                elif cx > maxx:
+                    maxx = cx
+                if cy < miny:
+                    miny = cy
+                elif cy > maxy:
+                    maxy = cy
+                for nx, ny in ((cx + 1, cy), (cx - 1, cy), (cx, cy + 1), (cx, cy - 1)):
+                    if (0 <= nx < w and 0 <= ny < h and not seen[ny][nx]
+                            and icon_grid[ny][nx] == icon):
+                        seen[ny][nx] = True
+                        stack.append((nx, ny))
+            rects.append((minx, miny, maxx, maxy, icon))
+    return grid, rects
 
 
 def deco_path_for(map_dir, name):
@@ -456,12 +488,14 @@ ICONS = _IconCache()
 
 # 底色：草地绿（游戏里大半张图就是这个色）
 GRASS_RGB = (124, 158, 92)
-# 游戏里一格约 67.5 点，地块贴图 80 点，所以贴图比格子大一圈
-SPRITE_RATIO = 80.0 / 67.5
+# 贴图按「80 像素 = 1 格」来换算。地块图正好 80×80，湖是 240×160（3×2 格），
+# 山是 320×320（4×4 格）。以前把整张贴图硬塞进一格，湖和山的边缘就出现
+# 一圈圈方格接缝 —— 游戏里的做法是按原始尺寸贴，相邻的图天然叠成一片。
+TILE_PX_REF = 80.0
 
 
 def render_sprite_image(fixed, region, scale, flip, bank):
-    """贴图渲染：草地底 → 装饰矩形 → 每格资源图标。"""
+    """贴图渲染：草地底 → 装饰贴图（按原始尺寸居中叠放）→ 每格资源贴图。"""
     from PIL import Image
 
     x0, y0, x1, y1 = region or (0, 0, fixed.w, fixed.h)
@@ -478,19 +512,33 @@ def render_sprite_image(fixed, region, scale, flip, bank):
         """地图行 → 屏幕行（flip 时上下翻转）。"""
         return fixed.h - 1 - y if flip else y
 
-    # 1) 装饰：湖泊/草丛/小丘/山体，都是铺一片的贴图
+    # 1) 装饰：湖泊/草丛/小丘/山体。每块按自己的原始尺寸贴，居中在它的中心，
+    #    超出格子的部分自然压到邻居格上，多个贴图叠起来才是游戏里那种成片的湖。
     for rx0, ry0, rx1, ry1, icon in fixed.deco_rects:
-        if rx1 < x0 or rx0 >= x1 or ry1 < y0 or ry0 >= y1:
+        raw = bank.raw(icon)
+        if raw is None:
             continue
-        im = bank.sized(icon, (rx1 - rx0 + 1) * S, (ry1 - ry0 + 1) * S)
+        sw, sh = raw.size
+        tw = max(1, int(round(sw * S / TILE_PX_REF)))
+        th = max(1, int(round(sh * S / TILE_PX_REF)))
+        # 中心（格子坐标，取格子中心）
+        cxm = (rx0 + rx1) / 2.0 + 0.5
+        cym = (ry0 + ry1) / 2.0 + 0.5
+        # 视口外就跳过（按贴图自身占的格数放宽）
+        if (cxm + tw / (2.0 * S) <= x0 or cxm - tw / (2.0 * S) >= x1
+                or cym + th / (2.0 * S) <= y0 or cym - th / (2.0 * S) >= y1):
+            continue
+        im = bank.sized(icon, tw, th)
         if im is None:
             continue
-        top = min(sy_of(ry0), sy_of(ry1))
-        img.paste(im, ((rx0 - x0) * S, (top - y0) * S), im)
+        cxs = cxm - x0
+        cys = (fixed.h - cym if flip else cym) - y0
+        img.paste(im, (int(round(cxs * S - tw / 2.0)),
+                       int(round(cys * S - th / 2.0))), im)
 
-    # 2) 资源：每格一张图，居中、略大于格子
-    rs = max(2, int(round(S * SPRITE_RATIO)))
-    half = S // 2 - rs // 2
+    # 2) 资源：每格一张图，正好一格大
+    rs = max(2, int(round(S)))
+    half = (S - rs) // 2
     for sy in range(y0, y1):
         row = fixed.grid[sy_of(sy)]
         base = (sy - y0) * S + half

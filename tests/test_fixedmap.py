@@ -171,5 +171,33 @@ class DecorationTests(unittest.TestCase):
         self.assertEqual(m.color_at(6, 6), PALETTE["building"])
 
 
+    def test_adjacent_same_deco_merges_into_one_block(self):
+        """同一片湖是逐格标记的，必须合并成一块。
+
+        以前按「每条记录画一张整贴图」来，一片 5×2 的湖会被叠画十几次，
+        边缘叠出一条条横带，看着像错位。
+        """
+        items = []
+        for y in range(3, 5):             # 3×2 的一小片湖
+            for x in range(4, 7):
+                items.append({"start": y * 20 + x, "decoration": 6, "end": y * 20 + x})
+        p = self._write(items)
+        table = {6: {"icon": "lake_109", "type": 6}}
+        grid, rects = fixedmap.load_decorations(p, 20, 20, table, want_rects=True)
+        self.assertEqual(len(rects), 1, "六格同一张图应该合成一块")
+        self.assertEqual(rects[0], (4, 3, 6, 4, "lake_109"))
+        # 每一格仍然要标成「湖」，色块兜底时才不会露底
+        self.assertEqual(grid[4][6], fixedmap.DECO_LAKE)
+
+    def test_different_deco_stays_separate(self):
+        """相邻但不是同一张图（湖 vs 山）不能合并。"""
+        items = [{"start": 5 * 20 + 5, "decoration": 6, "end": 5 * 20 + 5},
+                 {"start": 5 * 20 + 6, "decoration": 7, "end": 5 * 20 + 6}]
+        p = self._write(items)
+        table = {6: {"icon": "lake_109", "type": 6}, 7: {"icon": "hill_105", "type": 5}}
+        _, rects = fixedmap.load_decorations(p, 20, 20, table, want_rects=True)
+        self.assertEqual(len(rects), 2)
+
+
 if __name__ == "__main__":
     unittest.main()
