@@ -1919,7 +1919,6 @@
         if (t.hp) lines.push(`血量 ${t.hp}`);
       }
       if (t.size) lines.push(`占地 ${t.size}`);
-      lines.push(t.occupyable ? "可占领 · 单击加入草稿" : "不可占领");
       tip.textContent = lines.join("\n");
       const stage = $("fixedStage").getBoundingClientRect();
       let left = clientX - stage.left + 14;
@@ -2019,13 +2018,26 @@
       fixed.drag = null;
       c.classList.remove("dragging");
       if (!d) return;
-      // 没真正拖过 = 单击。以前按「位移 ≤ 4px」判断，
-      // 手点一下鼠标抖 5px 就被当成拖动，于是一格都点不上。
+      // 拖过就不算点击：只有「按下后基本没动」才当单击。
+      // moved 由下面的 mousemove 置位；阈值 6px（手点鼠标抖 3~4px 很正常，
+      // 太小会点不上格子，太大又会让小幅拖动被误判成点击）。
       if (!d.moved) fixedClick(e.clientX, e.clientY);
       else fixedDraw();
     });
     window.addEventListener("mousemove", e => {
-      if (!fixed.drag) return;
+      const d = fixed.drag;
+      if (!d) return;
+      if (!d.moved) {
+        // 还没跨过阈值：先不动地图，否则「点一下」会让画面抖 3px，
+        // 松手时按新视野算格子，点中的就不是原来那格了。
+        if (Math.hypot(e.clientX - d.x, e.clientY - d.y) <= 6) return;
+        d.moved = true;
+        // 以跨过阈值的这一刻重新起算，避免地图突然跳 6px
+        d.x = e.clientX;
+        d.y = e.clientY;
+        d.vx = fixed.view.x;
+        d.vy = fixed.view.y;
+      }
       const dpr = window.devicePixelRatio || 1;
       const tilePx = fixed.scale * dpr;
       fixed.view.x = fixed.drag.vx - (e.clientX - fixed.drag.x) * dpr / tilePx;
