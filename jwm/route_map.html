@@ -162,12 +162,8 @@
   /* 地图与队列这类「产品面」用深色，形成奶油/深色的节奏 */
   .panel.runtime { background: var(--surface-soft); border-color: transparent; }
 
-  .controls, .legend, .actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); }
-  .controls, .legend { padding: var(--s-3) var(--s-4); }
-  .legend {
-    justify-content: space-between; color: var(--muted); font-size: var(--t-small);
-    border-top: 1px solid var(--hairline);
-  }
+  .controls, .actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); }
+  .controls { padding: var(--s-3) var(--s-4); }
   .key {
     display: inline-block; margin-right: var(--s-2); width: 9px; height: 9px;
     border-radius: 2px; border: 1px solid currentColor; vertical-align: -1px;
@@ -204,40 +200,8 @@
   button.accent { color: var(--primary); border-color: #cc785c66; background: var(--canvas); }
   button.accent:hover:not(:disabled) { background: #cc785c14; border-color: var(--primary); }
 
-  /* ---------- 地图：深色产品面 ---------- */
-  /* 地图 = 嵌在奶油卡片里的一个游戏窗口：外面留米色，里面才是深色画面 */
-  .viewport {
-    display: grid; place-items: center;
-    background: var(--surface-soft);
-    padding: var(--s-3);
-    min-height: 300px;
-  }
-  /* hidden 属性自带 display:none，但上面写了 display:grid 会把它压掉，
-     结果「切到全图视图」时实时视野那块仍然占着位置，两个地图上下叠在一起 */
-  .viewport[hidden] { display: none; }
-  /* 按钮默认是 inline-block，会把 hidden 压掉，跟 .viewport 那次是同一个坑 */
+  /* ---------- 地图：apk 固定全图（不再有截图拼接视图） ---------- */
   .controls button[hidden], .controls span[hidden] { display: none; }
-  #map {
-    display: block; width: 100%; height: clamp(380px, 68vh, 740px);
-    touch-action: none; cursor: grab;
-    background: var(--surface-dark);
-    border-radius: var(--r-sm);
-  }
-
-  /* ---------- 全图视图：apk 固定地图，不拼截图 ---------- */
-  .viewswitch {
-    display: inline-flex; gap: 2px; margin: 0 0 var(--s-3);
-    background: var(--surface-soft); padding: 3px; border-radius: var(--r-sm);
-  }
-  .viewswitch button {
-    font: inherit; font-size: 13px; padding: 6px 12px; cursor: pointer;
-    border: 0; border-radius: calc(var(--r-sm) - 2px);
-    background: transparent; color: var(--muted);
-  }
-  .viewswitch button[aria-selected="true"] {
-    background: var(--canvas); color: var(--ink);
-    box-shadow: 0 1px 2px #00000014;
-  }
   .fullmap { margin-top: 0; }
   .fullmap-bar {
     display: flex; align-items: center; gap: var(--s-3);
@@ -650,24 +614,7 @@
   <div class="layout" id="mapPage">
     <div class="panel">
       <div class="controls" aria-label="地图浏览">
-        <button data-pan="home">主城</button>
-        <button id="readMap">读取当前视野</button>
-        <button id="regionMode" title="在地图上拖出一个方框，只刷新这一块">框选刷新</button>
-        <button id="syncNow" title="把模拟器镜头移到这里，重新截一帧拼进地图">同步模拟器到这里</button>
         <button id="pauseScript" title="暂停后脚本不再点模拟器，你可以自己操作；再点一次继续">暂停脚本</button>
-        <span class="muted" id="syncHint"></span>
-      </div>
-      <!-- 视图切换：全图（apk 固定地图，快且全） / 实时视野（截图拼接） -->
-      <div class="viewswitch" role="tablist" aria-label="地图视图">
-        <button id="viewFixed" role="tab" aria-selected="true">全图 · 固定地图</button>
-        <button id="viewLive" role="tab" aria-selected="false">实时视野 · 截图拼接</button>
-      </div>
-      <div class="viewport" id="mapViewport">
-        <p id="placeholder">进入游戏后，脚本会读取主城周边地图。</p>
-        <svg id="map" viewBox="0 270 720 880" aria-label="可选地块地图" hidden>
-          <defs id="mapClips"></defs><g id="mapImages"></g>
-          <g id="cells"></g><g id="markers" pointer-events="none"></g>
-        </svg>
       </div>
       <!-- 全图视图：直接用 apk 里的固定地图渲染，不再拼接截图 -->
       <div class="fullmap" id="fullmapBox" hidden>
@@ -708,11 +655,6 @@
           <span><i class="key owned"></i>已确认占领</span>
           <span><i class="key route"></i>开荒路线</span>
         </div>
-      </div>
-      <div class="legend" id="liveLegend">
-        <span><i class="key owned"></i>已确认占领</span>
-        <span><i class="key route"></i>开荒路线</span>
-        <span><i class="key water"></i>水域</span>
       </div>
       <div class="mode-bar">
         <span>打不动的地块：</span>
@@ -854,226 +796,35 @@
   </div>
 <script>
   const $ = id => document.getElementById(id);
-  const panButtons = [...document.querySelectorAll("[data-pan]")];
   const draft = [];
-  let state = null, atlasKey = "", busy = false, online = false, write = 0;
+  let state = null, busy = false, online = false, write = 0;
   let offlineNotified = false, starting = false, failureSince = 0;
   let syncTimer;
-  let center = [0, 0], height = 740, gesture = null, dragged = false;
-  let atlasTiles = new Map(), fillTimer, movedViewport = false;
-  let fillBounds = "", triedCenters = new Set(), stalled = 0, pendingFill = null;
-  let regionSelect = false, syncSoon = null, regionStart = null, regionEnd = null;
-  let tileSize = 67.5;
-  const world = p => [(p[0] - state.home[0]) * tileSize, (state.home[1] - p[1]) * tileSize];
-  const gamePoint = () => [state.home[0] + Math.round(center[0] / tileSize),
-                          state.home[1] - Math.round(center[1] / tileSize)];
   const position = p => `(${p[0]}, ${p[1]})`;
   const key = p => p.join(",");
-  const svg = (tag, attrs) => {
-    const el = document.createElementNS("http://www.w3.org/2000/svg", tag);
-    for (const [name, value] of Object.entries(attrs)) el.setAttribute(name, value);
-    return el;
-  };
-  function pick(tile) {
-    if (!online || busy || dragged || !["land", "owned_hint"].includes(tile.kind)) return;
-    const p = [tile.x, tile.y];
-    const last = draft.at(-1);
-    if (draft.some(existing => key(existing) === key(p))) {
-      $("feedback").textContent = "这格已经在草稿中。";
-    } else if (last && Math.abs(last[0] - p[0]) + Math.abs(last[1] - p[1]) !== 1) {
-      $("feedback").textContent = "请点上一个地块的上、下、左或右。";
-    } else if (draft.length < 200) {
-      draft.push(p);
-      $("feedback").textContent = "";
-      render();
-    }
-  }
-  function moveTo(x, y) {
-    const map = $("map");
-    if (!state?.home || !map.clientWidth || !map.clientHeight) return;
-    const [x1, y1, x2, y2] = scanBounds();
-    const [left, top] = world([x1, y2]).map(n => n - tileSize / 2);
-    const [right, bottom] = world([x2, y1]).map(n => n + tileSize / 2);
-    const ratio = map.clientWidth / map.clientHeight;
-    const shownHeight = Math.min(height, bottom - top, (right - left) / ratio);
-    const width = shownHeight * ratio;
-    center = [Math.max(left + width / 2, Math.min(right - width / 2, x)),
-              Math.max(top + shownHeight / 2, Math.min(bottom - shownHeight / 2, y))];
-    map.setAttribute("viewBox", [center[0] - width / 2, center[1] - shownHeight / 2, width, shownHeight].join(" "));
-    $("location").textContent = "主城 " + position(state.home) + " · 视野中心 " + position(gamePoint());
-    scheduleFill();
-  }
-  function scanBounds() {
-    const [x, y] = state.home;
-    const radius = state.scanRadius;
-    return [Math.max(0, x - radius), Math.max(0, y - radius), x + radius, y + radius];
-  }
-  function visibleBounds() {
-    const [hx, hy] = state.home;
-    const [x1, y1, x2, y2] = scanBounds();
-    const box = $("map").viewBox.baseVal;
-    return [
-      Math.max(x1, hx + Math.floor(box.x / tileSize + .5)),
-      Math.max(y1, hy - Math.ceil((box.y + box.height) / tileSize - .5)),
-      Math.min(x2, hx + Math.ceil((box.x + box.width) / tileSize - .5)),
-      Math.min(y2, hy - Math.floor(box.y / tileSize + .5))
-    ];
-  }
-  function scheduleFill() {
-    if (fillTimer) return;
-    fillTimer = setTimeout(() => {
-      fillTimer = null;
-      fillViewport();
-    }, 140);
-  }
-  function fillViewport() {
-    if (!online || busy || !state?.view || state.scanning || (state.warming && !movedViewport) ||
-        $("mapPage").hidden) return;
-    const bounds = visibleBounds();
-    const signature = key(bounds);
-    if (signature !== fillBounds) {
-      fillBounds = signature;
-      triedCenters.clear();
-      stalled = 0;
-    }
-    const [x1, y1, x2, y2] = bounds;
-    const missing = new Set();
-    for (let y = y1; y <= y2; y++) {
-      for (let x = x1; x <= x2; x++) {
-        if (!atlasTiles.has(key([x, y]))) missing.add(key([x, y]));
-      }
-    }
-    if (pendingFill) {
-      if (pendingFill.bounds === signature) stalled = missing.size < pendingFill.size ? 0 : stalled + 1;
-      pendingFill = null;
-    }
-    if (!missing.size) return;
-    let target = null, bestScore = 0, bestDistance = Infinity;
-    const [cx, cy] = state.view.center;
-    if (stalled < 3) {
-      for (const cell of missing) {
-        if (triedCenters.has(cell)) continue;
-        const [x, y] = cell.split(",").map(Number);
-        let score = 0;
-        // 中部地块避开游戏 HUD。按可补齐的地块数挑下一张截图，距离近的优先。
-        for (let dy = -4; dy <= 4; dy++) {
-          for (let dx = -3; dx <= 3; dx++) {
-            if (missing.has(key([x + dx, y + dy]))) score++;
-          }
-        }
-        const distance = Math.max(Math.abs(cx - x), Math.abs(cy - y));
-        if (score > bestScore || (score === bestScore && distance < bestDistance)) {
-          target = [x, y];
-          bestScore = score;
-          bestDistance = distance;
-        }
-      }
-    }
-    if (!target) {
-      $("mapInfo").textContent = "部分地块暂未读到，可移动视野或点「读取当前视野」重试。";
-      return;
-    }
-    triedCenters.add(key(target));
-    pendingFill = { bounds: signature, size: missing.size };
-    command("scan", { center: target, viewport: bounds }, true);
-  }
-  function draw() {
-    const cells = $("cells");
-    const markers = $("markers");
-    const frames = state?.frames ?? [];
-    const signature = JSON.stringify(frames);
-    if (atlasKey !== signature) {
-      atlasKey = signature;
-      cells.replaceChildren();
-      atlasTiles = new Map();
-      const validFrames = new Set(frames.map(frame => String(frame.frame)));
-      for (const node of [...$("mapImages").children, ...$("mapClips").children]) {
-        if (!validFrames.has(node.getAttribute("data-frame"))) node.remove();
-      }
-      for (const frame of frames) {
-        const first = frame.tiles[0];
-        if (!first) continue;
-        for (const t of frame.tiles) atlasTiles.set(key([t.x, t.y]), t);
-        const frameName = "clip-" + frame.frame;
-        if ($(frameName)) continue;
-        const clip = svg("clipPath", { id: frameName, "data-frame": frame.frame });
-        for (const t of frame.tiles) {
-          const [x, y] = world([t.x, t.y]);
-          clip.append(svg("rect", { x: x - tileSize/2, y: y - tileSize/2, width: tileSize, height: tileSize }));
-        }
-        const [x, y] = world([first.x, first.y]);
-        $("mapClips").append(clip);
-        $("mapImages").append(svg("image", { "data-frame": frame.frame, href: "map/" + frame.frame,
-          x: x - tileSize/2 - first.left, y: y - tileSize/2 - (first.top - 270),
-          width: 720, height: 880, "clip-path": "url(#" + frameName + ")" }));
-      }
-      for (const t of atlasTiles.values()) {
-        const [x, y] = world([t.x, t.y]);
-        const rect = svg("rect", { x: x - tileSize/2, y: y - tileSize/2, width: tileSize, height: tileSize, class: "cell " + t.kind });
-        const title = svg("title", {});
-        const label = { owned: "已确认占领", owned_hint: "归属待核对，可选点", water: "水域" }[t.kind];
-        title.textContent = position([t.x, t.y]) + (label ? " · " + label : "");
-        rect.append(title);
-        rect.onclick = () => pick(t);
-        cells.append(rect);
-      }
-    }
-    markers.replaceChildren();
-    if (!state?.home) return;
-    const points = (draft.length ? draft : state.path).map(world);
-    points.forEach((p, i) => {
-      if (p && points[i - 1]) {
-        const [x1, y1] = points[i - 1];
-        markers.append(svg("line", { x1, y1, x2: p[0], y2: p[1], class: "path-line" }));
-      }
-    });
-    points.forEach((p, i) => {
-      if (!p) return;
-      markers.append(svg("circle", { cx: p[0], cy: p[1], r: 15, class: `marker ${!draft.length && i < state.index ? "done" : ""}` }));
-      const text = svg("text", { x: p[0], y: p[1], class: "marker-text" });
-      text.textContent = i + 1;
-      markers.append(text);
-    });
-  }
   function render() {
-    const view = state?.view;
-    const nextTile = Number(view?.tile) || 67.5;
-    if (state?.home && Math.abs(nextTile - tileSize) > 0.001) {
-      const focus = gamePoint();
-      tileSize = nextTile;
-      center = world(focus);
-      atlasKey = "";
-    }
     const path = state?.path ?? [];
     const index = state?.index ?? 0;
     const active = state?.active;
+    // 地图只有固定全图一种，有主城就算可操作（以前这里看的是截图视野 state.view）
+    const ready = Boolean(state?.home);
     renderRuntime();
-    const mapReady = Boolean(view);
-    $("map").toggleAttribute("hidden", !mapReady);
-    $("placeholder").hidden = mapReady;
+    $("location").textContent = state?.home ? "主城 " + position(state.home) : "等待游戏地图";
     $("mapInfo").textContent = !online
       ? (starting ? "脚本正在启动，地图就绪后会自动显示，请稍候…"
                   : "脚本没在运行，请回控制台点「启动脚本」。")
-      : state?.scanning ? "正在补齐当前视野…" :
-      state?.warming ? "正在预读主城周边地图…" :
-      state?.mapError || (view ? "拖动或缩放时自动补图 · 点击地块选点" : "等待进入大地图");
+      : state?.mapError || (ready ? "点击格子选点 · 滚轮缩放 · 拖动平移" : "等待进入大地图");
     $("progress").textContent = path.length ? `${index} / ${path.length} 已占领 · ${active ? "执行中" : index === path.length ? "完成" : "已暂停"}` : "等待选点";
     $("routeStatus").textContent = state?.status ?? "提交路线后，从第一格开始占领。";
     $("listTitle").textContent = draft.length ? `路线草稿 · ${draft.length} 格` : "规划路线";
     $("start").textContent = path.length ? "替换当前路线" : "开始开荒";
-    $("start").disabled = busy || !online || !view || !draft.length;
-    $("addRoute").disabled = busy || !online || !view || !draft.length;
+    $("start").disabled = busy || !online || !ready || !draft.length;
+    $("addRoute").disabled = busy || !online || !ready || !draft.length;
     $("pause").disabled = busy || !online || !active;
     $("resume").disabled = busy || !online || active || index >= path.length;
     $("undo").disabled = $("clear").disabled = !draft.length;
-    $("autoplan").disabled = busy || !online || !view;
-    for (const button of panButtons) button.disabled = !view;
-    // 暂停期间这些按钮要禁掉：它们都会让脚本去点/拖模拟器，
-    // 现在模拟器交给用户了，点了只会互相打架。
+    $("autoplan").disabled = busy || !online || !ready;
     const isPaused = Boolean(state?.paused);
-    $("readMap").disabled = busy || !online || state?.scanning || isPaused;
-    $("regionMode").disabled = busy || !online || isPaused;
-    $("syncNow").disabled = busy || !online || isPaused;
     const pb = $("pauseScript");
     if (pb) {
       pb.textContent = isPaused ? "继续脚本" : "暂停脚本";
@@ -1105,15 +856,13 @@
         : "草稿为空 —— 在地图上点格子开始规划。";
       $("routeList").replaceChildren(item);
     }
-    draw();
-    if (view) moveTo(...center);
     if (state?.operations) {
       renderSquads(state.operations.squads || [], state.operations.activeSquad, state.routeKey || "");
     }
     renderOps();
-    // 全图视图要跟着状态走：占领到哪、路线挪到哪，都要实时反映
-    if (mapViewMode === "fixed") {
-      if (!fixedAutoTried && state?.home) fixedAutoPick();
+    // 全图要跟着状态走：占领到哪、路线挪到哪，都要实时反映
+    if (ready) {
+      if (!fixedAutoTried) fixedAutoPick();
       fixedDraw();
     }
   }
@@ -1189,137 +938,9 @@
   $("autoplan").onclick = () => command("autoplan", { count: 30 });
   $("pause").onclick = () => command("pause");
   $("resume").onclick = () => command("resume");
-  const pans = { north: [0, -3], south: [0, 3], west: [-3, 0], east: [3, 0] };
-  for (const button of panButtons) button.onclick = () => {
-    movedViewport = true;
-    const delta = pans[button.dataset.pan];
-    if (delta) moveTo(center[0] + delta[0] * tileSize, center[1] + delta[1] * tileSize);
-    else moveTo(0, 0);
-  };
   $("pauseScript").onclick = () => {
     command("toggle_freeze");
   };
-  $("readMap").onclick = () => {
-    triedCenters.clear();
-    pendingFill = null;
-    stalled = 0;
-    command("scan", state?.home ? { center: gamePoint(), viewport: visibleBounds() } : {});
-  };
-  $("regionMode").onclick = () => {
-    regionSelect = !regionSelect;
-    $("regionMode").setAttribute("aria-pressed", String(regionSelect));
-    board.classList.toggle("region-mode", regionSelect);
-    $("syncHint").textContent = regionSelect
-      ? "在地图上拖出一个方框，只刷新这一块。" : "";
-    if (!regionSelect) clearRegionBox();
-  };
-  $("syncNow").onclick = () => {
-    const p = gamePoint();
-    const d = state?.home
-      ? Math.max(Math.abs(p[0] - state.home[0]), Math.abs(p[1] - state.home[1])) : 0;
-    $("syncHint").textContent = d > 12
-      ? "已提交：镜头要分几次拖过去，大约十几秒（脚本开荒会先让一让）…"
-      : "已提交：正在把镜头移过去…";
-    command("scan", state?.home ? { center: gamePoint(), viewport: visibleBounds() } : {});
-  };
-  const board = $("map");
-  // 屏幕像素 → viewBox → 游戏坐标（框选和拖拽都靠它）
-  function boardPoint(e) {
-    const r = board.getBoundingClientRect();
-    const vb = board.viewBox.baseVal;
-    if (!r.width || !r.height) return [0, 0];
-    return [vb.x + (e.clientX - r.left) * (vb.width / r.width),
-            vb.y + (e.clientY - r.top) * (vb.height / r.height)];
-  }
-  const pointToGame = p => [state.home[0] + Math.round(p[0] / tileSize),
-                            state.home[1] - Math.round(p[1] / tileSize)];
-  function syncSimulator() {
-    // 用户在网页上拖动之后，让模拟器跟到同一块地，再截一帧拼进来。
-    // 但只跟「主城附近、能快速走到」的位置：拖到很远的未扫描区时不自动折腾模拟器，
-    // 而是提示用「同步模拟器到这里」，避免一次拖动就让镜头跑很久、还把拼图打乱。
-    if (!online || busy || !state?.home || !state?.view) return;
-    const p = gamePoint();
-    const dist = Math.max(Math.abs(p[0] - state.home[0]), Math.abs(p[1] - state.home[1]));
-    if (dist > 12) {
-      $("syncHint").textContent = "这里离主城较远（" + dist + " 格），点「同步模拟器到这里」才会真的移动镜头。";
-      return;
-    }
-    clearTimeout(syncSoon);
-    $("syncHint").textContent = "正在让模拟器跟到这个位置…";
-    syncSoon = setTimeout(() => {
-      command("scan", { center: gamePoint(), viewport: visibleBounds() }, true);
-    }, 300);
-  }
-  board.onpointerdown = e => {
-    if (e.button !== 0) return;
-    gesture = { id: e.pointerId, x: e.clientX, y: e.clientY, center: [...center],
-      region: regionSelect, start: regionSelect ? boardPoint(e) : null };
-    dragged = false;
-    if (regionSelect) { regionStart = gesture.start; regionEnd = null; }
-  };
-  board.onpointermove = e => {
-    if (gesture?.id !== e.pointerId) return;
-    const dx = e.clientX - gesture.x, dy = e.clientY - gesture.y;
-    if (!dragged && Math.hypot(dx, dy) < 5) return;
-    if (!dragged) board.setPointerCapture(e.pointerId);
-    dragged = true;
-    movedViewport = true;
-    if (gesture.region) {
-      regionEnd = boardPoint(e);
-      drawRegion(gesture.start, regionEnd);
-      return;
-    }
-    board.classList.add("dragging");
-    const scale = board.viewBox.baseVal.height / board.clientHeight;
-    moveTo(gesture.center[0] - dx * scale, gesture.center[1] - dy * scale);
-  };
-  function drawRegion(a, b) {
-    let box = $("regionBox");
-    if (!box) {
-      box = svg("rect", { id: "regionBox", class: "region-box" });
-      $("markers").append(box);
-    }
-    box.setAttribute("x", Math.min(a[0], b[0]));
-    box.setAttribute("y", Math.min(a[1], b[1]));
-    box.setAttribute("width", Math.abs(a[0] - b[0]));
-    box.setAttribute("height", Math.abs(a[1] - b[1]));
-  }
-  function clearRegionBox() {
-    const box = $("regionBox");
-    if (box) box.remove();
-  }
-  function finishPan() {
-    const g = gesture;
-    gesture = null;
-    board.classList.remove("dragging");
-    if (!g || !dragged) return;
-    if (g.region) {
-      if (!regionStart || !regionEnd) return;
-      const a = pointToGame(regionStart), b = pointToGame(regionEnd);
-      const region = [Math.min(a[0], b[0]), Math.min(a[1], b[1]),
-                      Math.max(a[0], b[0]), Math.max(a[1], b[1])];
-      regionSelect = false;
-      $("regionMode").setAttribute("aria-pressed", "false");
-      $("map").classList.remove("region-mode");
-      clearRegionBox();
-      regionStart = regionEnd = null;
-      $("syncHint").textContent = "已选 (" + region[0] + "," + region[1] + ")–(" +
-        region[2] + "," + region[3] + ")，正在刷新这块…";
-      command("scan_region", { region });
-      return;
-    }
-    // 普通拖动：让模拟器镜头跟到网页停下来的位置，同时把新画面拼进来
-    syncSimulator();
-  }
-  window.addEventListener("pointerup", finishPan);
-  board.onpointercancel = finishPan;
-  board.addEventListener("wheel", e => {
-    e.preventDefault();
-    movedViewport = true;
-    height = Math.max(330, Math.min(1550, height * Math.exp(e.deltaY * .0015)));
-    moveTo(...center);
-  }, { passive: false });
-  new ResizeObserver(() => { if (board.clientWidth) moveTo(...center); }).observe(board);
   const option = (value, title) => new Option(title, value);
   function replaceOptions(select, items) {
     const signature = JSON.stringify(items);
@@ -1748,7 +1369,8 @@
     $("opsPage").hidden = !show;
     $("mapTab").setAttribute("aria-selected", String(!show));
     $("opsTab").setAttribute("aria-selected", String(show));
-    if (!show && state?.home) moveTo(...center);
+    // 全图画布在隐藏期间量不到尺寸，切回来要重新量一次再画
+    if (!show && state?.home) { fixedResize(); fixedDraw(); }
   }
   $("refreshOps").onclick = () => opsCommand("refresh");
   $("stopScript").onclick = async () => {
@@ -1814,11 +1436,7 @@
         if (generation === write) {
           const changed = !online || JSON.stringify(data) !== JSON.stringify(state);
           if (state?.home && data.home && key(state.home) !== key(data.home)) {
-            draft.length = 0;
-            center = [0, 0];
-            movedViewport = false;
-            fillBounds = "";
-            pendingFill = null;
+            draft.length = 0;      // 换主城/换账号：旧草稿的坐标不再成立
           }
           state = data;
           online = true;
@@ -2079,22 +1697,18 @@
     if (tilePx < 3) return;                    // 太小了画上去只是一团糊
     const px = (sx, sy) => [(sx - fixed.view.x) * tilePx, (sy - fixed.view.y) * tilePx];
 
-    // 1) 已占领 / 归属待核对的格子
-    const owned = [];
-    for (const f of state?.frames || []) {
-      for (const t of f.tiles || []) {
-        if (t.kind === "owned" || t.kind === "owned_hint") owned.push(t);
-      }
-    }
-    if (owned.length) {
-      for (const t of owned) {
-        const [sx, sy] = fixedScreenOf(t.x, t.y);
+    // 1) 已占领 / 归属待核对的格子（后端只发这两类，键是 "x,y"）
+    const known = state?.known || {};
+    if (Object.keys(known).length) {
+      for (const [cell, kind] of Object.entries(known)) {
+        const [x, y] = cell.split(",").map(Number);
+        const [sx, sy] = fixedScreenOf(x, y);
         if (sx < sx0 || sy < sy0 || sx > sx0 + sw || sy > sy0 + sh) continue;
         const [dx, dy] = px(sx, sy);
-        ctx.fillStyle = t.kind === "owned" ? "rgba(93,184,114,0.34)" : "rgba(93,184,114,0.16)";
+        ctx.fillStyle = kind === "owned" ? "rgba(93,184,114,0.34)" : "rgba(93,184,114,0.16)";
         ctx.fillRect(dx, dy, tilePx, tilePx);
         if (tilePx >= 10) {
-          ctx.strokeStyle = t.kind === "owned" ? "rgba(93,184,114,0.95)" : "rgba(93,184,114,0.55)";
+          ctx.strokeStyle = kind === "owned" ? "rgba(93,184,114,0.95)" : "rgba(93,184,114,0.55)";
           ctx.lineWidth = Math.max(1, dpr);
           ctx.strokeRect(dx + .5, dy + .5, tilePx - 1, tilePx - 1);
         }
@@ -2471,8 +2085,6 @@
       fixedDraw();
     });
     $("fixedCenter").addEventListener("click", () => fixedCenterOnHome());
-    $("viewFixed")?.addEventListener("click", () => setMapView("fixed"));
-    $("viewLive")?.addEventListener("click", () => setMapView("live"));
     window.addEventListener("resize", () => { fixedResize(); fixedDraw(); });
 
     // 兜底：只要鼠标不在画布矩形里（挪到留白、侧栏、浏览器外），就把气泡收掉。
@@ -2495,10 +2107,10 @@
     if (!box) return;
     const ok = await loadFixedMaps();
     if (!ok) {
-      // 没有固定地图数据（apk 未导出）就退回截图拼接视图，不能让地图区空着
+      // 没有固定地图数据（apk 未导出）：地图区空着，但路线、队列等其它功能照常
       box.hidden = true;
       box.dataset.unavailable = "1";
-      setMapView("live");
+      $("mapInfo").textContent = "没有固定地图数据（apk 未导出），地图区暂时空着；路线编辑与队列不受影响。";
       return;
     }
     box.hidden = false;
@@ -2507,45 +2119,7 @@
     fixedResize();
     fixedBind();
     fixedCentered = false;
-    setMapView("fixed");
     fixedCenterOnHome();
-  }
-
-  // 视图切换：fixed = apk 固定地图（默认） / live = 截图拼接
-  let mapViewMode = "";
-  // 这三个只有截图拼接才用得上：固定地图是整张渲染好的图，不需要读视野、
-  // 框选、也不存在「把镜头移过去」这回事。留在工具栏上只会让人误点。
-  const LIVE_ONLY = ["readMap", "regionMode", "syncNow"];
-
-  function setMapView(mode) {
-    mapViewMode = mode;
-    hideFixedTip();                    // 换视图时别把上一个视图的气泡留在屏幕上
-    const fixedBox = $("fullmapBox");
-    // 注意：以前这里写的是 $("mapPage .viewport")，而 $ 是 getElementById，
-    // 永远返回 null —— 于是实时视野的老地图从来不隐藏，两个视图上下叠在一起。
-    const liveBox = $("mapViewport");
-    const btnF = $("viewFixed"), btnL = $("viewLive");
-    const hasFixed = Boolean(fixedBox && fixed.loaded && !fixedBox.dataset.unavailable);
-    const useFixed = mode === "fixed" && hasFixed;
-    for (const id of LIVE_ONLY) {
-      const b = $(id);
-      if (b) b.hidden = useFixed;
-    }
-    if (useFixed) {
-      fixedBox.hidden = false;
-      if (liveBox) liveBox.hidden = true;
-      if ($("liveLegend")) $("liveLegend").hidden = true;
-      btnF?.setAttribute("aria-selected", "true");
-      btnL?.setAttribute("aria-selected", "false");
-      // 切回来时重新量尺寸，隐藏期间 getBoundingClientRect 是 0
-      requestAnimationFrame(() => { fixedResize(); fixedCenterOnHomeIfNew(); fixedDraw(); });
-    } else {
-      if (fixedBox) fixedBox.hidden = true;
-      if (liveBox) liveBox.hidden = false;
-      if ($("liveLegend")) $("liveLegend").hidden = false;
-      btnF?.setAttribute("aria-selected", "false");
-      btnL?.setAttribute("aria-selected", "true");
-    }
   }
 
   // 刚切到全图视图时视野可能还是 0×0 时算的，重新对一次主城

@@ -241,7 +241,13 @@ class RouteMap:
     def snapshot(self):
         from . import pause as pause_gate
         with self.lock:
-            return dict(view=self.view, frames=[entry[0] for entry in self.frames.values()],
+            # 只发「已确认占领 / 归属待核对」的格子给网页上色。
+            # 以前这里把每帧的全部格子和图片一起发（frames），是为了让网页拼接截图；
+            # 拼接视图已经去掉，继续发只是每 2 秒白传几十 KB。
+            known = {"%d,%d" % k: v for k, v in self.known.items()
+                     if v in ("owned", "owned_hint")}
+            return dict(view=self.view,
+                        known=known,
                         scanRadius=SCAN_RADIUS,
                         paused=pause_gate.paused(),
                         operations=self.operations.snapshot() if self.operations else None,
