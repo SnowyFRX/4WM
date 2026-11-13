@@ -92,7 +92,7 @@ def land_kind(entry, value):
 class FixedMap:
     """一张固定地图 + land 表，负责查询与渲染。"""
 
-    def __init__(self, name, grid, land_by_id, land_attr=None, deco=None):
+    def __init__(self, name, grid, land_by_id, land_attr=None, deco=None, deco_rects=None):
         self.name = name
         self.grid = grid            # 二维 list[list[int]]
         self.h = len(grid)
@@ -100,6 +100,7 @@ class FixedMap:
         self.land = land_by_id or {}
         self.land_attr = land_attr or {}
         self.deco = deco            # 二维 list[list[int]]，装饰大类；没有就是 None
+        self.deco_rects = deco_rects or []   # [(x0,y0,x1,y1,icon)]，贴图渲染用
 
     # ---------- 查询 ----------
     def value(self, x, y):
@@ -206,8 +207,8 @@ def _load_land_table(apk_reader):
     return land, attr
 
 
-def load_decorations(path, w, h, deco_table=None):
-    """把 decorations_N.json 展开成 w×h 的装饰大类矩阵。
+def load_decorations(path, w, h, deco_table=None, want_rects=False):
+    """把 decorations_N.json 展开成 w×h 的装饰大类矩阵（want_rects 时连同矩形一起给）。
 
     格式：items = [{"start": 格索引, "decoration": 装饰id, "end": 格索引}, ...]
     格索引 = y * 宽度 + x。
@@ -216,20 +217,22 @@ def load_decorations(path, w, h, deco_table=None):
     再取矩形范围，不能当成「线性区间」直接 range(start, end+1) —— 那样跨行的
     记录会从行尾铺到下一行行首，整张图会变成一条一条的横条纹。
 
+    rects 里保留 icon 名，贴图渲染要用（只留大类码的话只能涂颜色）。
     阴影类直接跳过（十三万格纯投影，画上去只是把图弄脏）。
     """
     if not os.path.exists(path):
-        return None
+        return (None, []) if want_rects else None
     try:
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
     except (OSError, ValueError):
-        return None
+        return (None, []) if want_rects else None
     items = data.get("items") if isinstance(data, dict) else data
     if not items:
-        return None
+        return (None, []) if want_rects else None
 
     grid = [[DECO_NONE] * w for _ in range(h)]
+    rects = []
     table = deco_table or {}
     for rec in items:
         did = rec.get("decoration")
@@ -248,10 +251,20 @@ def load_decorations(path, w, h, deco_table=None):
         y2, x2 = divmod(int(b if b is not None else a), w)
         x0_, x1_ = (x1, x2) if x1 <= x2 else (x2, x1)
         y0_, y1_ = (y1, y2) if y1 <= y2 else (y2, y1)
-        for yy in range(max(0, y0_), min(h, y1_ + 1)):
+        x0_ = max(0, x0_)
+        y0_ = max(0, y0_)
+        x1_ = min(w - 1, x1_)
+        y1_ = min(h - 1, y1_)
+        if x1_ < x0_ or y1_ < y0_:
+            continue
+        for yy in range(y0_, y1_ + 1):
             row = grid[yy]
-            for xx in range(max(0, x0_), min(w, x1_ + 1)):
+            for xx in range(x0_, x1_ + 1):
                 row[xx] = code
+        if icon:
+            rects.append((x0_, y0_, x1_, y1_, icon))
+    if want_rects:
+        return grid, rects
     return grid
 
 
@@ -331,6 +344,7 @@ def load_all(map_dir, apk_path=None, land=None, land_attr=None, with_decor=True)
         try:
             name = fn[:-5]
             deco = None
+            rects = []
             if deco_table:
                 dpath = deco_path_for(map_dir, name)
                 # 地图多宽得先知道才能把格索引拆成 x/y，所以先读 cells
@@ -340,8 +354,8 @@ def load_all(map_dir, apk_path=None, land=None, land_attr=None, with_decor=True)
                 w = len(cells[0]) if cells else 0
                 h = len(cells)
                 if w and h:
-                    deco = load_decorations(dpath, w, h, deco_table)
-                m = FixedMap(head.get("name") or name, cells, land, land_attr or {}, deco)
+                    deco, rects = load_decorations(dpath, w, h, deco_table, want_rects=True)
+                m = FixedMap(head.get("name") or name, cells, land, land_attr or {}, deco, rects)
             else:
                 m = load_map_from_json(os.path.join(map_dir, fn), land, land_attr or {})
         except Exception:
@@ -353,7 +367,7 @@ def load_all(map_dir, apk_path=None, land=None, land_attr=None, with_decor=True)
 # ---------------- 渲染 ----------------
 
 def render_array(fixed, region=None, scale=1, flip=False):
-    """把地图渲染成 HxWx3 的 numpy 数组（RGB）。
+    """把地图渲染成 HxWx3 的 numpy 数组（RGB）——纯色块版本，作为贴图不可用时的兜底。
 
     region: (x0, y0, x1, y1) 闭开区间；None 表示整张图。
     scale: 每格放大倍数（整数）。
@@ -384,11 +398,130 @@ def render_array(fixed, region=None, scale=1, flip=False):
     return img
 
 
+class IconBank:
+    """data/tiles 下按 icon 名命名的贴图（草/树/石/粮田/湖…）。
+
+    游戏里每格其实是一张贴图，不是一块颜色。这些图从 apk 的
+    tmp/image/land_0..3/ 提取，用草地主题 land_0。
+    """
+
+    def __init__(self, path):
+        self.path = path
+        self._raw = {}
+        self._scaled = {}
+
+    def raw(self, icon):
+        if icon in self._raw:
+            return self._raw[icon]
+        from PIL import Image
+        p = os.path.join(self.path, icon + ".png")
+        im = None
+        if os.path.exists(p):
+            try:
+                im = Image.open(p).convert("RGBA")
+            except OSError:
+                im = None
+        self._raw[icon] = im
+        return im
+
+    def sized(self, icon, w, h):
+        key = (icon, w, h)
+        if key in self._scaled:
+            return self._scaled[key]
+        im = self.raw(icon)
+        if im is not None:
+            from PIL import Image
+            im = im.resize((max(1, w), max(1, h)), Image.LANCZOS)
+        self._scaled[key] = im
+        return im
+
+
+class _IconCache:
+    """图标库的单例：进程内只扫一次目录。"""
+
+    def __init__(self):
+        self.bank = None
+        self.checked = False
+
+    def get(self):
+        if not self.checked:
+            root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            d = os.path.join(root, "data", "tiles")
+            self.bank = IconBank(d) if os.path.isdir(d) else None
+            self.checked = True
+        return self.bank
+
+
+ICONS = _IconCache()
+
+# 底色：草地绿（游戏里大半张图就是这个色）
+GRASS_RGB = (124, 158, 92)
+# 游戏里一格约 67.5 点，地块贴图 80 点，所以贴图比格子大一圈
+SPRITE_RATIO = 80.0 / 67.5
+
+
+def render_sprite_image(fixed, region, scale, flip, bank):
+    """贴图渲染：草地底 → 装饰矩形 → 每格资源图标。"""
+    from PIL import Image
+
+    x0, y0, x1, y1 = region or (0, 0, fixed.w, fixed.h)
+    x0, y0 = max(0, int(x0)), max(0, int(y0))
+    x1, y1 = min(fixed.w, int(x1)), min(fixed.h, int(y1))
+    w, h = max(0, x1 - x0), max(0, y1 - y0)
+    if w <= 0 or h <= 0:
+        return Image.new("RGB", (1, 1), GRASS_RGB)
+
+    S = max(1, int(scale))
+    img = Image.new("RGB", (w * S, h * S), GRASS_RGB)
+
+    def sy_of(y):
+        """地图行 → 屏幕行（flip 时上下翻转）。"""
+        return fixed.h - 1 - y if flip else y
+
+    # 1) 装饰：湖泊/草丛/小丘/山体，都是铺一片的贴图
+    for rx0, ry0, rx1, ry1, icon in fixed.deco_rects:
+        if rx1 < x0 or rx0 >= x1 or ry1 < y0 or ry0 >= y1:
+            continue
+        im = bank.sized(icon, (rx1 - rx0 + 1) * S, (ry1 - ry0 + 1) * S)
+        if im is None:
+            continue
+        top = min(sy_of(ry0), sy_of(ry1))
+        img.paste(im, ((rx0 - x0) * S, (top - y0) * S), im)
+
+    # 2) 资源：每格一张图，居中、略大于格子
+    rs = max(2, int(round(S * SPRITE_RATIO)))
+    half = S // 2 - rs // 2
+    for sy in range(y0, y1):
+        row = fixed.grid[sy_of(sy)]
+        base = (sy - y0) * S + half
+        for sx in range(x0, x1):
+            e = fixed.land.get(row[sx]) or {}
+            icon = e.get("icon") or ""
+            if not icon:
+                continue
+            im = bank.sized(icon, rs, rs)
+            if im is None:
+                continue
+            img.paste(im, ((sx - x0) * S + half, base), im)
+    return img
+
+
 def render_png(fixed, region=None, scale=1, flip=False):
-    """渲染成 PNG 字节（给 HTTP 直接下发）。"""
+    """渲染成 PNG 字节（给 HTTP 直接下发）。
+
+    有 data/tiles 图标就贴图；没有就退回纯色块，至少还能用。
+    """
     import cv2
-    arr = render_array(fixed, region=region, scale=scale, flip=flip)
-    ok, buf = cv2.imencode(".png", cv2.cvtColor(arr, cv2.COLOR_RGB2BGR))
+    import numpy as np
+
+    bank = ICONS.get()
+    if bank is not None:
+        img = render_sprite_image(fixed, region, scale, flip, bank)
+        arr = np.array(img)[:, :, ::-1]                    # RGB → BGR
+    else:
+        arr = cv2.cvtColor(render_array(fixed, region=region, scale=scale, flip=flip),
+                           cv2.COLOR_RGB2BGR)
+    ok, buf = cv2.imencode(".png", arr)
     if not ok:
         raise RuntimeError("PNG 编码失败")
     return buf.tobytes()

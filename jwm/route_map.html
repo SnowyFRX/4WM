@@ -1842,6 +1842,25 @@
   const FIXED_STORE = "jwm.fixed.name";
   const FIXED_FLIP = "jwm.fixed.flip";
 
+  // 鼠标当前所在的格（画细框），以及刚点过的格（画脉冲框）。
+  // 只是为了「点下去有反应」，不参与任何判定。
+  let fixedHoverCell = null;
+  let fixedLastPick = null;
+  let fixedPulseTimer = 0;
+
+  function fixedPulse(cell, ok) {
+    fixedLastPick = { x: cell.x, y: cell.y, at: Date.now(), ok };
+    if (fixedPulseTimer) clearInterval(fixedPulseTimer);
+    fixedPulseTimer = setInterval(() => {
+      if (!fixedLastPick || Date.now() - fixedLastPick.at > 1600) {
+        clearInterval(fixedPulseTimer);
+        fixedPulseTimer = 0;
+        fixedLastPick = null;
+      }
+      fixedDraw();
+    }, 80);
+  }
+
   async function loadFixedMaps() {
     try {
       const r = await fetch("fixed", { cache: "no-store" });
@@ -2073,6 +2092,62 @@
         });
       }
     }
+
+    // 3) 草稿格整格涂亮 + 描边 + 序号。
+    //    以前草稿只有一条细白点，点了一格几乎看不出来，用户以为没点上。
+    if (draft.length) {
+      const font = Math.max(10, Math.round(tilePx * 0.5));
+      draft.forEach((p, i) => {
+        const [sx, sy] = fixedScreenOf(p[0], p[1]);
+        if (sx < sx0 || sy < sy0 || sx > sx0 + sw || sy > sy0 + sh) return;
+        const [dx, dy] = px(sx, sy);
+        ctx.fillStyle = "rgba(232,150,60,0.42)";
+        ctx.fillRect(dx, dy, tilePx, tilePx);
+        ctx.strokeStyle = i === draft.length - 1 ? "#ffffff" : "#ffb84d";
+        ctx.lineWidth = i === draft.length - 1 ? Math.max(2, dpr * 2) : Math.max(1.5, dpr * 1.2);
+        const pad = ctx.lineWidth / 2;
+        ctx.strokeRect(dx + pad, dy + pad, tilePx - pad * 2, tilePx - pad * 2);
+        if (tilePx >= 18) {
+          ctx.font = `600 ${font}px ui-sans-serif, system-ui, sans-serif`;
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+          ctx.lineWidth = Math.max(2, font / 5);
+          ctx.strokeStyle = "rgba(20,20,20,0.75)";
+          ctx.strokeText(String(i + 1), dx + tilePx / 2, dy + tilePx / 2);
+          ctx.fillStyle = "#ffffff";
+          ctx.fillText(String(i + 1), dx + tilePx / 2, dy + tilePx / 2);
+        }
+      });
+    }
+
+    // 4) 鼠标所在格：细白框，说明"这格能点"
+    if (fixedHoverCell && tilePx >= 4) {
+      const [sx, sy] = [fixedHoverCell.x, fixedHoverCell.y];
+      if (sx >= sx0 && sy >= sy0 && sx <= sx0 + sw && sy <= sy0 + sh) {
+        const [dx, dy] = px(sx, sy);
+        ctx.strokeStyle = "rgba(255,255,255,0.85)";
+        ctx.lineWidth = Math.max(1.5, dpr);
+        ctx.strokeRect(dx + 1, dy + 1, tilePx - 2, tilePx - 2);
+      }
+    }
+
+    // 5) 刚点过的那一格：亮框闪一下，成/不成颜色不同
+    if (fixedLastPick) {
+      const age = (Date.now() - fixedLastPick.at) / 1000;
+      if (age < 1.6) {
+        const k = 1 - age / 1.6;                       // 1 → 0
+        const [dx, dy] = px(fixedLastPick.x, fixedLastPick.y);
+        const grow = tilePx * 0.35 * (1 - k);          // 往外扩一圈
+        ctx.save();
+        ctx.globalAlpha = 0.35 + 0.65 * k;
+        ctx.strokeStyle = fixedLastPick.ok ? "#ffe08a" : "#ff7d7d";
+        ctx.lineWidth = Math.max(2.5, dpr * 2.5);
+        ctx.strokeRect(dx - grow, dy - grow, tilePx + grow * 2, tilePx + grow * 2);
+        ctx.restore();
+      } else {
+        fixedLastPick = null;
+      }
+    }
   }
 
   // 主城位置标一个十字 + 圆环
@@ -2192,51 +2267,49 @@
       // 反馈框在页面下方，看图时看不见，所以工具条上也留一份
       $("fixedMsg").textContent = text;
     };
+    // 失败也要在图上闪一下红框，否则用户以为「点了没反应」
+    const fail = text => { say(text); fixedPulse(cell, false); };
 
-    if (!online) { say("脚本没在运行，先回控制台启动。"); return; }
-    if (busy) { say("正在执行上一个操作，稍等。"); return; }
+    if (!online) return fail("脚本没在运行，先回控制台启动。");
+    if (busy) return fail("正在执行上一个操作，稍等。");
     say("正在读取这一格…");
 
     let t;
     try {
       const r = await fetch(`fixedtile?map=${encodeURIComponent(fixed.name)}&x=${gx}&y=${gy}`,
                             { cache: "no-store" });
-      if (!r.ok) { say("这格读不到数据。"); return; }
+      if (!r.ok) return fail("这格读不到数据。");
       t = await r.json();
     } catch (e) {
-      say("读取这格失败。");
-      return;
+      return fail("读取这格失败。");
     }
 
     const p = [gx, gy];
     const last = draft.at(-1);
     if (draft.some(existing => key(existing) === key(p))) {
-      say("这格已经在草稿中。");
-      return;
+      return fail(`(${gx}, ${gy}) 已经在草稿里了。`);
     }
-    if (t.kind === "water") { say(`(${gx}, ${gy}) 是水域，不能占领。`); return; }
-    if (t.kind === "building") { say(`(${gx}, ${gy}) 是建筑占地，不能占领。`); return; }
+    if (t.kind === "water") return fail(`(${gx}, ${gy}) 是水域，不能占领。`);
+    if (t.kind === "building") return fail(`(${gx}, ${gy}) 是建筑占地，不能占领。`);
     if (t.kind === "decor" || t.kind === "other" || t.kind === "unknown") {
-      say(`(${gx}, ${gy}) 是地形装饰格，不能占领。`);
-      return;
+      return fail(`(${gx}, ${gy}) 是地形装饰格，不能占领。`);
     }
-    if (!t.occupyable) { say(`(${gx}, ${gy}) 这张表标着不能占领。`); return; }
+    if (!t.occupyable) return fail(`(${gx}, ${gy}) 这张表标着不能占领。`);
     if (t.size && String(t.size) !== "1x1") {
-      say(`(${gx}, ${gy}) 是 ${t.size} 的多格地块，暂不支持加入路线。`);
-      return;
+      return fail(`(${gx}, ${gy}) 是 ${t.size} 的多格地块，暂不支持加入路线。`);
     }
     const isHome = state?.home
       && Math.abs(gx - state.home[0]) <= 1 && Math.abs(gy - state.home[1]) <= 1;
-    if (isHome) { say("这格是主城自己，不能开荒。"); return; }
+    if (isHome) return fail("这格是主城自己，不能开荒。");
     if (last && Math.abs(last[0] - p[0]) + Math.abs(last[1] - p[1]) !== 1) {
-      say("请点上一个地块的上、下、左或右。");
-      return;
+      return fail("请点上一个地块的上、下、左或右。");
     }
-    if (draft.length >= 200) { say("草稿最多 200 格。"); return; }
+    if (draft.length >= 200) return fail("草稿最多 200 格。");
 
     draft.push(p);
     say(`已加入草稿：(${gx}, ${gy}) ${fixedKindName(t.kind)}${t.level ? " Lv" + t.level : ""}`
         + ` · 共 ${draft.length} 格`);
+    fixedPulse(cell, true);
     render();
   }
 
@@ -2246,7 +2319,7 @@
 
     c.addEventListener("mousedown", e => {
       fixed.drag = { x: e.clientX, y: e.clientY, vx: fixed.view.x, vy: fixed.view.y,
-                     moved: 0 };
+                     moved: false };
       c.classList.add("dragging");
     });
     window.addEventListener("mouseup", e => {
@@ -2254,9 +2327,9 @@
       fixed.drag = null;
       c.classList.remove("dragging");
       if (!d) return;
-      // 位移很小 = 单击（不是拖动）→ 当作选点
-      const moved = Math.abs(e.clientX - d.x) + Math.abs(e.clientY - d.y);
-      if (moved <= 4) fixedClick(e.clientX, e.clientY);
+      // 没真正拖过 = 单击。以前按「位移 ≤ 4px」判断，
+      // 手点一下鼠标抖 5px 就被当成拖动，于是一格都点不上。
+      if (!d.moved) fixedClick(e.clientX, e.clientY);
       else fixedDraw();
     });
     window.addEventListener("mousemove", e => {
@@ -2269,9 +2342,18 @@
       fixedDraw();
     });
     c.addEventListener("mousemove", e => {
-      if (!fixed.drag) fixedShowTile(e.clientX, e.clientY);
+      if (fixed.drag) return;
+      const cell = fixedCellAt(e.clientX, e.clientY);
+      const changed = !fixedHoverCell
+        || fixedHoverCell.x !== cell.x || fixedHoverCell.y !== cell.y;
+      fixedHoverCell = cell;
+      if (changed) fixedDraw();          // 悬停框跟着鼠标走
+      fixedShowTile(e.clientX, e.clientY);
     });
-    c.addEventListener("mouseleave", () => { $("fixedTip").hidden = true; });
+    c.addEventListener("mouseleave", () => {
+      $("fixedTip").hidden = true;
+      if (fixedHoverCell) { fixedHoverCell = null; fixedDraw(); }
+    });
     c.addEventListener("wheel", e => {
       e.preventDefault();
       const r = c.getBoundingClientRect();

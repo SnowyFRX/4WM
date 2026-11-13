@@ -17,6 +17,12 @@ logs/*
 !data/maps/
 data/maps/*.json
 !data/maps/maps_*.json
+# 装饰 id → icon 的对照表，6KB。没有它，decorations_N 里的数字还原不成都/草/湖。
+!data/maps/decoration_table.json
+
+# 例外：地块贴图（281 个 png，1.2MB）。地图要靠它们才画得像游戏，
+# 纯色块版本根本看不出地形。可用 tools/extract_tiles.py 从 apk 重新导出。
+!data/tiles/
 
 # 本机临时
 _tmp/
